@@ -36,12 +36,14 @@ services:
     environment:
       - FUTU_OPEND_IP=futu-opend
       - FUTU_OPEND_PORT=11111
+      - FUTU_RSA_FILE_PATH=/.futu/futu.pem
       - SERVICE_FILE=/app/service_account.json
       - SHEET_NAME=LID Risk Management
       - WORKSHEET_TITLE=Today
       - TARGET_HOUR=04
       - TARGET_MINUTE=00
     volumes:
+      - ./futu.pem:/.futu/futu.pem:ro
       - ./OptionPython/service_account.json:/app/service_account.json:ro
       - ./OptionPython/20241205stocklist.csv:/app/20241205stocklist.csv:ro
     depends_on:
