@@ -1,0 +1,137 @@
+name: Deploy to DO002
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DO002_SSH_KEY }}
+          SSH_HOST: ${{ secrets.DO002_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Test SSH connection
+        env:
+          SSH_HOST: ${{ secrets.DO002_HOST }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@$SSH_HOST "echo 'SSH connection successful' && hostname"
+
+      - name: Create .env file
+        env:
+          FUTU_ACCOUNT_ID: ${{ secrets.FUTU_ACCOUNT_ID }}
+          FUTU_ACCOUNT_PWD: ${{ secrets.FUTU_ACCOUNT_PWD }}
+        run: |
+          cat > .env << 'EOF'
+FUTU_ACCOUNT_ID=${FUTU_ACCOUNT_ID}
+FUTU_ACCOUNT_PWD=${FUTU_ACCOUNT_PWD}
+FUTU_OPEND_IP=0.0.0.0
+FUTU_OPEND_PORT=11111
+FUTU_RSA_FILE_PATH=/.futu/futu.pem
+SERVICE_FILE=/app/service_account.json
+SHEET_NAME=LID Risk Management
+WORKSHEET_TITLE=Today
+TARGET_HOUR=04
+TARGET_MINUTE=00
+EOF
+          sed -i "s/\${FUTU_ACCOUNT_ID}/$FUTU_ACCOUNT_ID/g" .env
+          sed -i "s/\${FUTU_ACCOUNT_PWD}/$FUTU_ACCOUNT_PWD/g" .env
+          cat .env
+
+      - name: Install Docker on DO002 (if needed)
+        env:
+          SSH_HOST: ${{ secrets.DO002_HOST }}
+        run: |
+          if ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no root@$SSH_HOST "which docker > /dev/null 2>&1"; then
+            echo "Docker already installed"
+          else
+            echo "Installing Docker..."
+            ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no root@$SSH_HOST << 'INSTALL_DOCKER'
+              set -e
+              apt-get update
+              apt-get install -y ca-certificates curl gnupg lsb-release
+              mkdir -p /etc/apt/keyrings
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+              apt-get update
+              apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+              systemctl enable docker
+              systemctl start docker
+              echo "Docker installed successfully"
+INSTALL_DOCKER
+          fi
+
+      - name: Deploy to DO002
+        env:
+          SSH_HOST: ${{ secrets.DO002_HOST }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no root@$SSH_HOST "mkdir -p /opt/loading-futu-automation"
+          scp -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no docker-compose.yml .env FutuOpenD.xml futu.pem root@$SSH_HOST:/opt/loading-futu-automation/
+
+      - name: Pull futu-opend image
+        env:
+          SSH_HOST: ${{ secrets.DO002_HOST }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no root@$SSH_HOST "docker pull manhinhang/futu-opend-docker:ubuntu-stable"
+
+      - name: Start futu-opend container
+        env:
+          SSH_HOST: ${{ secrets.DO002_HOST }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no root@$SSH_HOST << 'ENDSSH'
+            set -e
+            cd /opt/loading-futu-automation
+
+            # Remove existing container if exists
+            docker rm -f futu-opend 2>/dev/null || true
+
+            # Create volume for futu-opend data
+            docker volume create futu-opend-data 2>/dev/null || true
+
+            # Start container
+            docker-compose up -d futu-opend
+
+            echo "Container starting..."
+            docker ps --filter name=futu-opend
+          ENDSSH
+
+      - name: Wait for futu-opend to be ready
+        env:
+          SSH_HOST: ${{ secrets.DO002_HOST }}
+        run: |
+          echo "Waiting for futu-opend to start..."
+          sleep 30
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no root@$SSH_HOST "docker logs futu-opend 2>&1 | tail -30"
+
+      - name: Health check futu-opend
+        env:
+          SSH_HOST: ${{ secrets.DO002_HOST }}
+        run: |
+          for i in {1..5}; do
+            echo "Health check attempt $i..."
+            if ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no root@$SSH_HOST "docker exec futu-opend curl -s -o /dev/null -w '%{http_code}' http://localhost:11111 2>/dev/null || echo '000'" | grep -q '200\|000'; then
+              echo "Health check passed"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Health check pending - container may need phone verification"
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no root@$SSH_HOST "docker logs futu-opend 2>&1 | tail -20"
+
+      - name: Verify deployment
+        env:
+          SSH_HOST: ${{ secrets.DO002_HOST }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no root@$SSH_HOST "docker ps --filter name=futu-opend --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"

@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate docker-compose
+        run: |
+          docker-compose -f docker-compose.yml config --quiet
+          echo "docker-compose.yml is valid"
+
+      - name: Check required files exist
+        run: |
+          ls -la FutuOpenD.xml futu.pem OptionPython/Dockerfile OptionPython/app.py OptionPython/requirements.txt

@@ -1,0 +1,4 @@
+pygsheets
+pandas
+futu-api
+openpyxl
