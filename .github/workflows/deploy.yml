@@ -36,7 +36,6 @@ jobs:
             '  <api_port>11111</api_port>' \
             "  <login_account>$FUTU_ACCOUNT_ID</login_account>" \
             '  <login_pwd_md5>e60fb8ff518391fc726cb414d8c3b23c</login_pwd_md5>' \
-            '  <login_by_remember>true</login_by_remember>' \
             '  <lang>chs</lang>' \
             '  <log_level>info</log_level>' \
             '  <push_proto_type>0</push_proto_type>' \
