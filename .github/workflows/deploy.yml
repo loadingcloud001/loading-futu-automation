@@ -73,6 +73,8 @@ jobs:
             cd /opt/loading-futu-automation
             docker rm -f futu-opend option-python 2>/dev/null || true
             docker pull manhinhang/futu-opend-docker:ubuntu-stable
+            docker network rm loading-futu-automation_futu-net 2>/dev/null || true
+            docker network create loading-futu-automation_futu-net
             docker run -d \
               --name futu-opend \
               --restart unless-stopped \
@@ -82,6 +84,7 @@ jobs:
               -v futu-opend-data:/.futu \
               -p 11111:11111 \
               -p 22222:22222 \
+              --network loading-futu-automation_futu-net \
               manhinhang/futu-opend-docker:ubuntu-stable
             sleep 5
             docker build -t option-python ./OptionPython
@@ -89,7 +92,9 @@ jobs:
               --name option-python \
               --restart unless-stopped \
               --env-file .env \
-              --link futu-opend \
+              --network loading-futu-automation_futu-net \
+              -e FUTU_OPEND_IP=futu-opend \
+              -e FUTU_OPEND_PORT=11111 \
               -v /opt/loading-futu-automation/OptionPython/service_account.json:/app/service_account.json:ro \
               option-python
             docker ps --filter "name=futu-opend" --filter "name=option-python"
