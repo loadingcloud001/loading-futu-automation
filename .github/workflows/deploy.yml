@@ -13,16 +13,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Copy files to DO002
-        uses: appleboy/scp-action@v0.1.4
-        with:
-          host: ${{ secrets.DO002_HOST }}
-          username: root
-          key: ${{ secrets.DO002_SSH_KEY }}
-          source: "OptionPython/,docker-compose.yml,FutuOpenD.xml,futu.pem"
-          target: "/opt/loading-futu-automation"
-          strip_components: 0
-
       - name: Deploy to DO002
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -70,6 +60,35 @@ jobs:
             else
               echo "Skipping futu-opend (already running and logged in)"
             fi
+            
+            echo "=== Creating OptionPython files from inline content ==="
+            # Create Dockerfile
+            cat > /opt/loading-futu-automation/OptionPython/Dockerfile << 'EOFDOCKER'
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app.py .
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "app.py"]
+EOFDOCKER
+
+            # Create requirements.txt
+            cat > /opt/loading-futu-automation/OptionPython/requirements.txt << 'EOFREQ'
+futu-api
+pandas
+openpyxl
+google-api-python-client
+google-auth
+EOFREQ
+
+            # Copy app.py from workspace (it's already on the runner)
+            cp /github/workspace/OptionPython/app.py /opt/loading-futu-automation/OptionPython/
+            
+            # Copy docker-compose.yml and other files
+            cp /github/workspace/docker-compose.yml /opt/loading-futu-automation/
+            cp /github/workspace/FutuOpenD.xml /opt/loading-futu-automation/
+            cp /github/workspace/futu.pem /opt/loading-futu-automation/
             
             echo "=== Creating service account placeholder ==="
             echo '{}' > /opt/loading-futu-automation/OptionPython/service_account.json
