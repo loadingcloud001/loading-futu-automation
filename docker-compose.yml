@@ -16,6 +16,11 @@ services:
       - futu-opend-data:/.futu
     ports:
       - "11111:11111"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
     logging:
       driver: json-file
       options:
@@ -40,6 +45,11 @@ services:
       - ./OptionPython/service_account.json:/app/service_account.json:ro
     depends_on:
       - futu-opend
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.25'
     logging:
       driver: json-file
       options:
