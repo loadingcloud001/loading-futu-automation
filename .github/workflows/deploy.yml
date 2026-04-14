@@ -26,50 +26,42 @@ jobs:
         run: |
           printf 'FUTU_ACCOUNT_ID=%s\nFUTU_ACCOUNT_PWD=%s\n' "$FUTU_ACCOUNT_ID" "$FUTU_ACCOUNT_PWD" > .env
 
-      - name: Create FutuOpenD.xml on remote
+      - name: Create FutuOpenD.xml
         env:
           FUTU_ACCOUNT_ID: ${{ secrets.FUTU_ACCOUNT_ID }}
-          SSH_HOST: ${{ secrets.DO002_HOST }}
         run: |
-          ssh -o StrictHostKeyChecking=no root@$SSH_HOST "cat > /opt/loading-futu-automation/FutuOpenD.xml << 'XMLEOF'
-<?xml version=\"1.0\" encoding=\"utf-8\"?>
-<futu_opend>
-  <ip>0.0.0.0</ip>
-  <api_port>11111</api_port>
-  <login_account>$FUTU_ACCOUNT_ID</login_account>
-  <login_pwd_md5>e60fb8ff518391fc726cb414d8c3b23c</login_pwd_md5>
-  <lang>chs</lang>
-  <log_level>info</log_level>
-  <push_proto_type>0</push_proto_type>
-  <telnet_ip>futu-opend</telnet_ip>
-  <rsa_private_key>/.futu/futu.pem</rsa_private_key>
-  <price_reminder_push>1</price_reminder_push>
-  <auto_hold_quote_right>1</auto_hold_quote_right>
-  <future_trade_api_time_zone>UTC+8</future_trade_api_time_zone>
-  <pdt_protection>1</pdt_protection>
-  <dtcall_confirmation>1</dtcall_confirmation>
-</futu_opend>
-XMLEOF"
+          printf '%s\n' \
+            '<futu_opend>' \
+            '  <ip>0.0.0.0</ip>' \
+            '  <api_port>11111</api_port>' \
+            "  <login_account>$FUTU_ACCOUNT_ID</login_account>" \
+            '  <login_pwd_md5>e60fb8ff518391fc726cb414d8c3b23c</login_pwd_md5>' \
+            '  <lang>chs</lang>' \
+            '  <log_level>info</log_level>' \
+            '  <push_proto_type>0</push_proto_type>' \
+            '  <telnet_ip>futu-opend</telnet_ip>' \
+            '  <rsa_private_key>/.futu/futu.pem</rsa_private_key>' \
+            '  <price_reminder_push>1</price_reminder_push>' \
+            '  <auto_hold_quote_right>1</auto_hold_quote_right>' \
+            '  <future_trade_api_time_zone>UTC+8</future_trade_api_time_zone>' \
+            '  <pdt_protection>1</pdt_protection>' \
+            '  <dtcall_confirmation>1</dtcall_confirmation>' \
+            '</futu_opend>' > FutuOpenD.xml
 
-      - name: Create service_account.json on remote
+      - name: Create service_account.json
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          SSH_HOST: ${{ secrets.DO002_HOST }}
         run: |
           echo "$GOOGLE_SERVICE_ACCOUNT_JSON" | base64 -d > service_account.json
-          scp -o StrictHostKeyChecking=no service_account.json root@$SSH_HOST:/opt/loading-futu-automation/OptionPython/service_account.json
 
       - name: Deploy to DO002
         env:
           SSH_HOST: ${{ secrets.DO002_HOST }}
         run: |
-          # Copy files to remote (exclude .git, .secrets, .env, FutuOpenD.xml and service_account.json)
-          rsync -avz --exclude='.git' --exclude='.secrets' --exclude='.env' --exclude='service_account.json' --exclude='FutuOpenD.xml' \
+          ssh -o StrictHostKeyChecking=no root@$SSH_HOST "mkdir -p /opt/loading-futu-automation"
+          rsync -avz --exclude='.git' --exclude='.secrets' \
             -e "ssh -o StrictHostKeyChecking=no" \
             ./ root@$SSH_HOST:/opt/loading-futu-automation/
-
-          # Copy .env file
-          scp -o StrictHostKeyChecking=no .env root@$SSH_HOST:/opt/loading-futu-automation/
 
       - name: Start containers on remote
         env:
@@ -78,14 +70,8 @@ XMLEOF"
           ssh -o StrictHostKeyChecking=no root@$SSH_HOST << 'ENDSSH'
             set -e
             cd /opt/loading-futu-automation
-
-            # Stop and remove existing containers
             docker rm -f futu-opend option-python 2>/dev/null || true
-
-            # Pull latest futu-opend image
             docker pull manhinhang/futu-opend-docker:ubuntu-stable
-
-            # Start futu-opend with FutuOpenD.xml mounted
             docker run -d \
               --name futu-opend \
               --restart unless-stopped \
@@ -95,11 +81,7 @@ XMLEOF"
               -v futu-opend-data:/.futu \
               -p 11111:11111 \
               manhinhang/futu-opend-docker:ubuntu-stable
-
-            # Wait for futu-opend to be ready
             sleep 5
-
-            # Build and start option-python
             docker build -t option-python ./OptionPython
             docker run -d \
               --name option-python \
@@ -108,8 +90,6 @@ XMLEOF"
               --link futu-opend \
               -v /opt/loading-futu-automation/OptionPython/service_account.json:/app/service_account.json:ro \
               option-python
-
-            # Show status
             docker ps --filter "name=futu-opend" --filter "name=option-python"
           ENDSSH
 
