@@ -76,6 +76,7 @@ jobs:
               --name futu-opend \
               --restart unless-stopped \
               --env-file .env \
+              -e FUTU_OPEND_IP=0.0.0.0 \
               -v /opt/loading-futu-automation/FutuOpenD.xml:/FutuOpenD.xml \
               -v /opt/loading-futu-automation/futu.pem:/.futu/futu.pem:ro \
               -v futu-opend-data:/.futu \
