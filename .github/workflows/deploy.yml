@@ -39,8 +39,9 @@ jobs:
             '  <lang>chs</lang>' \
             '  <log_level>info</log_level>' \
             '  <push_proto_type>0</push_proto_type>' \
-            '  <telnet_ip>futu-opend</telnet_ip>' \
-            '  <rsa_private_key>/.futu/futu.pem</rsa_private_key>' \
+            '  <telnet_ip>0.0.0.0</telnet_ip>' \
+            '  <telnet_port>22222</telnet_port>' \
+            '  <rsa_private_key></rsa_private_key>' \
             '  <price_reminder_push>1</price_reminder_push>' \
             '  <auto_hold_quote_right>1</auto_hold_quote_right>' \
             '  <future_trade_api_time_zone>UTC+8</future_trade_api_time_zone>' \
@@ -78,9 +79,9 @@ jobs:
               --env-file .env \
               -e FUTU_OPEND_IP=0.0.0.0 \
               -v /opt/loading-futu-automation/FutuOpenD.xml:/FutuOpenD.xml \
-              -v /opt/loading-futu-automation/futu.pem:/.futu/futu.pem:ro \
               -v futu-opend-data:/.futu \
               -p 11111:11111 \
+              -p 22222:22222 \
               manhinhang/futu-opend-docker:ubuntu-stable
             sleep 5
             docker build -t option-python ./OptionPython
