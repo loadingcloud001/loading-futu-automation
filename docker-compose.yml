@@ -43,7 +43,7 @@ services:
       - TARGET_MINUTE=00
     volumes:
       - ./OptionPython/service_account.json:/app/service_account.json:ro
-      - ./OptionPython/stocklist.csv:/app/stocklist.csv:ro
+      - ./OptionPython/20241205stocklist.csv:/app/20241205stocklist.csv:ro
     depends_on:
       - futu-opend
     deploy:
