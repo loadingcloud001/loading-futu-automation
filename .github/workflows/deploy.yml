@@ -101,7 +101,7 @@ INSTALL_DOCKER
             docker volume create futu-opend-data 2>/dev/null || true
 
             # Start container
-            docker-compose up -d futu-opend
+            docker compose up -d futu-opend
 
             echo "Container starting..."
             docker ps --filter name=futu-opend
