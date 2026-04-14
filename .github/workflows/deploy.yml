@@ -13,21 +13,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Copy files to DO002
+        uses: appleboy/scp-action@v0.1.4
+        with:
+          host: ${{ secrets.DO002_HOST }}
+          username: root
+          key: ${{ secrets.DO002_SSH_KEY }}
+          source: "OptionPython/,docker-compose.yml,FutuOpenD.xml,futu.pem"
+          target: "/opt/loading-futu-automation"
+          strip_components: 0
+
       - name: Deploy to DO002
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.DO002_HOST }}
           username: root
           key: ${{ secrets.DO002_SSH_KEY }}
+          envs:
+            - FUTU_ACCOUNT_ID
+            - FUTU_ACCOUNT_PWD
           script: |
             set -e
             
             echo "=== Creating directories ==="
             mkdir -p /opt/loading-futu-automation/OptionPython
             
-            echo "=== Copying base files ==="
+            echo "=== Creating .env file ==="
             cd /opt/loading-futu-automation
-            # Create .env file
             printf 'FUTU_ACCOUNT_ID=%s\nFUTU_ACCOUNT_PWD=%s\nFUTU_OPEND_IP=futu-opend\nFUTU_OPEND_PORT=11111\nFUTU_RSA_FILE_PATH=/.futu/futu.pem\nSERVICE_FILE=/app/service_account.json\nSHEET_NAME=LID Risk Management\nWORKSHEET_TITLE=Today\nTARGET_HOUR=04\nTARGET_MINUTE=00\n' "$FUTU_ACCOUNT_ID" "$FUTU_ACCOUNT_PWD" > .env
             
             echo "=== Checking futu-opend status ==="
@@ -55,26 +67,27 @@ jobs:
               docker compose up -d futu-opend
               echo "Waiting 30s for futu-opend to start..."
               sleep 30
+            else
+              echo "Skipping futu-opend (already running and logged in)"
             fi
             
-            echo "=== Copying OptionPython files ==="
-            # Note: In real workflow, these would come from repo files
-            # For now, creating minimal placeholder
+            echo "=== Creating service account placeholder ==="
+            echo '{}' > /opt/loading-futu-automation/OptionPython/service_account.json
             
             echo "=== Building option-python ==="
-            docker compose build option-python || echo "Build may have failed if files missing"
+            docker compose build option-python
             
             echo "=== Starting option-python ==="
-            docker compose up -d option-python || echo "Start may have failed"
+            docker compose up -d option-python
             
             echo "=== Docker Containers ==="
             docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
             
             echo "=== FutuOpenD Logs ==="
-            docker logs futu-opend 2>&1 | tail -30 || echo "No logs available"
+            docker logs futu-opend 2>&1 | tail -10 || echo "No logs available"
             
             echo "=== OptionPython Logs ==="
-            docker logs option-python 2>&1 | tail -30 || echo "option-python not available"
+            docker logs option-python 2>&1 | tail -20 || echo "option-python not available"
 
       - name: Verify deployment
         run: |
