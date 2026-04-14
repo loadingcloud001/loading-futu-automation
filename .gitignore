@@ -2,7 +2,4 @@
 __pycache__/
 *.pyc
 *.pyo
-*.csv
-*.xlsx
-service_account.json
 *.log

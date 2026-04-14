@@ -129,10 +129,10 @@ def run_once(
 
     # 讀取股票清單
     try:
-        excel_data = pd.read_excel(EXCEL_PATH)
-        stock_list = excel_data['stock'].tolist()
+        stock_data = pd.read_csv('/app/stocklist.csv')
+        stock_list = stock_data['stock'].tolist()
     except Exception as e:
-        log_fn(f"讀取 Excel 錯誤：{e}")
+        log_fn(f"讀取 CSV 錯誤：{e}")
         quote_ctx.close()
         return
 
