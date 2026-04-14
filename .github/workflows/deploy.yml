@@ -34,20 +34,16 @@ jobs:
           FUTU_ACCOUNT_ID: ${{ secrets.FUTU_ACCOUNT_ID }}
           FUTU_ACCOUNT_PWD: ${{ secrets.FUTU_ACCOUNT_PWD }}
         run: |
-          cat > .env << 'EOF'
-FUTU_ACCOUNT_ID=${FUTU_ACCOUNT_ID}
-FUTU_ACCOUNT_PWD=${FUTU_ACCOUNT_PWD}
-FUTU_OPEND_IP=0.0.0.0
-FUTU_OPEND_PORT=11111
-FUTU_RSA_FILE_PATH=/.futu/futu.pem
-SERVICE_FILE=/app/service_account.json
-SHEET_NAME=LID Risk Management
-WORKSHEET_TITLE=Today
-TARGET_HOUR=04
-TARGET_MINUTE=00
-EOF
-          sed -i "s/\${FUTU_ACCOUNT_ID}/$FUTU_ACCOUNT_ID/g" .env
-          sed -i "s/\${FUTU_ACCOUNT_PWD}/$FUTU_ACCOUNT_PWD/g" .env
+          echo "FUTU_ACCOUNT_ID=$FUTU_ACCOUNT_ID" > .env
+          echo "FUTU_ACCOUNT_PWD=$FUTU_ACCOUNT_PWD" >> .env
+          echo "FUTU_OPEND_IP=0.0.0.0" >> .env
+          echo "FUTU_OPEND_PORT=11111" >> .env
+          echo "FUTU_RSA_FILE_PATH=/.futu/futu.pem" >> .env
+          echo "SERVICE_FILE=/app/service_account.json" >> .env
+          echo "SHEET_NAME=LID Risk Management" >> .env
+          echo "WORKSHEET_TITLE=Today" >> .env
+          echo "TARGET_HOUR=04" >> .env
+          echo "TARGET_MINUTE=00" >> .env
           cat .env
 
       - name: Install Docker on DO002 (if needed)
