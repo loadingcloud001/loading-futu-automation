@@ -21,17 +21,30 @@ services:
       options:
         max-size: 10m
         max-file: 3
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11111"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+
+  option-python:
+    build:
+      context: ./OptionPython
+      dockerfile: Dockerfile
+    container_name: option-python
+    restart: unless-stopped
+    environment:
+      - FUTU_OPEND_IP=futu-opend
+      - FUTU_OPEND_PORT=11111
+      - SERVICE_FILE=/app/service_account.json
+      - SHEET_NAME=LID Risk Management
+      - WORKSHEET_TITLE=Today
+      - TARGET_HOUR=04
+      - TARGET_MINUTE=00
+    volumes:
+      - ./OptionPython/service_account.json:/app/service_account.json:ro
+    depends_on:
+      - futu-opend
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: 3
 
 volumes:
   futu-opend-data:
