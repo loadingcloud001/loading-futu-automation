@@ -99,6 +99,9 @@ jobs:
               --network loading-futu-automation_futu-net \
               -e FUTU_OPEND_IP=futu-opend \
               -e FUTU_OPEND_PORT=11111 \
+              -e RETRY_MAX_ATTEMPTS=3 \
+              -e RETRY_INITIAL_DELAY=30 \
+              -e RETRY_MAX_DELAY=3600 \
               -v /opt/loading-futu-automation/OptionPython/service_account.json:/app/service_account.json:ro \
               option-python
             docker ps --filter "name=futu-opend" --filter "name=option-python"

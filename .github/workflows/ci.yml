@@ -21,3 +21,22 @@ jobs:
       - name: Check required files exist
         run: |
           ls -la FutuOpenD.xml futu.pem OptionPython/Dockerfile OptionPython/app.py OptionPython/requirements.txt
+
+      - name: Validate Python syntax
+        run: |
+          python3 -m py_compile OptionPython/app.py
+          echo "Python syntax is valid"
+
+      - name: Check retry configuration
+        run: |
+          echo "Validating retry environment variables in docker-compose.yml..."
+          grep -q "RETRY_MAX_ATTEMPTS=3" docker-compose.yml && echo "✓ RETRY_MAX_ATTEMPTS configured"
+          grep -q "RETRY_INITIAL_DELAY=30" docker-compose.yml && echo "✓ RETRY_INITIAL_DELAY configured"
+          grep -q "RETRY_MAX_DELAY=3600" docker-compose.yml && echo "✓ RETRY_MAX_DELAY configured"
+
+      - name: Check phone verification block detection
+        run: |
+          echo "Validating phone verification block detection in app.py..."
+          grep -q "PHONE_VERIFY_BLOCK_KEYWORDS" OptionPython/app.py && echo "✓ Block keywords defined"
+          grep -q "is_phone_verification_blocked" OptionPython/app.py && echo "✓ Block detection function exists"
+          grep -q "exponential_backoff_retry" OptionPython/app.py && echo "✓ Exponential backoff function exists"

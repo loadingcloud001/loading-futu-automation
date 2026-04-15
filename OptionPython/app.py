@@ -10,16 +10,27 @@ import queue
 from typing import Callable, Optional
 
 # === 設定參數 ===
-FUTU_HOST = os.getenv('FUTU_OPEND_IP', 'futu-opend')
-FUTU_PORT = int(os.getenv('FUTU_OPEND_PORT', '11111'))
-SERVICE_FILE = os.getenv('SERVICE_FILE', '/app/service_account.json')
-SHEET_NAME = os.getenv('SHEET_NAME', 'LID Risk Management')
-WORKSHEET_TITLE = os.getenv('WORKSHEET_TITLE', 'Today')
-EXCEL_PATH = os.getenv('EXCEL_PATH', '/app/20241205stocklist.xlsx')
-CSV_PATH = os.getenv('CSV_PATH', '/app/20241205optionresults.csv')
-TARGET_HOUR = os.getenv('TARGET_HOUR', '04').zfill(2)
-TARGET_MINUTE = os.getenv('TARGET_MINUTE', '00').zfill(2)
-FUTU_RSA_FILE_PATH = os.getenv('FUTU_RSA_FILE_PATH', '').strip()
+FUTU_HOST = os.getenv("FUTU_OPEND_IP", "futu-opend")
+FUTU_PORT = int(os.getenv("FUTU_OPEND_PORT", "11111"))
+SERVICE_FILE = os.getenv("SERVICE_FILE", "/app/service_account.json")
+SHEET_NAME = os.getenv("SHEET_NAME", "LID Risk Management")
+WORKSHEET_TITLE = os.getenv("WORKSHEET_TITLE", "Today")
+EXCEL_PATH = os.getenv("EXCEL_PATH", "/app/20241205stocklist.xlsx")
+CSV_PATH = os.getenv("CSV_PATH", "/app/20241205optionresults.csv")
+TARGET_HOUR = os.getenv("TARGET_HOUR", "04").zfill(2)
+TARGET_MINUTE = os.getenv("TARGET_MINUTE", "00").zfill(2)
+FUTU_RSA_FILE_PATH = os.getenv("FUTU_RSA_FILE_PATH", "").strip()
+RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "3"))
+RETRY_INITIAL_DELAY = float(os.getenv("RETRY_INITIAL_DELAY", "30"))
+RETRY_MAX_DELAY = float(os.getenv("RETRY_MAX_DELAY", "3600"))
+
+# Phone verification block detection
+PHONE_VERIFY_BLOCK_KEYWORDS = [
+    "需要手机验证码",
+    "手机验证码失败",
+    "系统繁忙暂时无法登录",
+]
+
 
 # === 工具函式 ===
 def format_log_line(msg: str) -> str:
@@ -40,15 +51,72 @@ def init_futu_encryption(log_fn: Callable[[str], None]) -> None:
     except Exception as e:
         log_fn(f"啟用 RSA 失敗：{e}")
 
+
+def is_phone_verification_blocked(error_msg: str) -> bool:
+    """Check if error message indicates phone verification block."""
+    return any(keyword in error_msg for keyword in PHONE_VERIFY_BLOCK_KEYWORDS)
+
+
+def exponential_backoff_retry(
+    log_fn: Callable[[str], None],
+    attempt: int,
+    delay: float,
+) -> float:
+    """Calculate next delay with exponential backoff, capped at max delay."""
+    next_delay = min(delay * 2, RETRY_MAX_DELAY)
+    log_fn(f"重試 #{attempt} 失敗，等待 {next_delay:.1f} 秒後重試 (已套用指數退避)")
+    return next_delay
+
+
+def create_quote_context_with_retry(
+    log_fn: Callable[[str], None],
+) -> Optional[OpenQuoteContext]:
+    """Create quote context with exponential backoff retry for phone verification blocks."""
+    delay = RETRY_INITIAL_DELAY
+
+    for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+        log_fn(f"嘗試 #{attempt} 連接 Futu OpenD...")
+
+        try:
+            quote_ctx = OpenQuoteContext(host=FUTU_HOST, port=FUTU_PORT)
+            log_fn(f"成功連接 Futu OpenD")
+            return quote_ctx
+        except Exception as e:
+            error_msg = str(e)
+            log_fn(f"連接失敗：{error_msg}")
+
+            if is_phone_verification_blocked(error_msg):
+                log_fn(f"偵測到電話驗證封鎖 (attempt #{attempt})")
+
+                if attempt < RETRY_MAX_ATTEMPTS:
+                    delay = exponential_backoff_retry(log_fn, attempt, delay)
+                    time.sleep(delay)
+                else:
+                    log_fn("已達最大重試次數，中止連線。請聯繫富途客服解除封鎖。")
+                    return None
+            else:
+                if attempt < RETRY_MAX_ATTEMPTS:
+                    delay = exponential_backoff_retry(log_fn, attempt, delay)
+                    time.sleep(delay)
+                else:
+                    log_fn("已達最大重試次數，中止連線。")
+                    return None
+
+    return None
+
+
 def append_zero_row(stock_code):
-    df_zero = pd.DataFrame({
-        'stock': [stock_code],
-        'turnoverc': [0],
-        'turnoverp': [0],
-        'ivc': [0.0],
-        'ivp': [0.0]
-    })
+    df_zero = pd.DataFrame(
+        {
+            "stock": [stock_code],
+            "turnoverc": [0],
+            "turnoverp": [0],
+            "ivc": [0.0],
+            "ivp": [0.0],
+        }
+    )
     return df_zero.infer_objects(copy=False)
+
 
 def process_stock(quote_ctx, stock_code, log_fn: Callable[[str], None] = console_log):
     try:
@@ -60,11 +128,15 @@ def process_stock(quote_ctx, stock_code, log_fn: Callable[[str], None] = console
         filter_call = OptionDataFilter(delta_min=0.05, delta_max=0.92, vol_min=1)
         filter_put = OptionDataFilter(delta_min=-0.92, delta_max=-0.05, vol_min=1)
 
-        ret2, data2 = quote_ctx.get_option_chain(code=stock_code, data_filter=filter_call, option_type=OptionType.CALL)
-        ret3, data3 = quote_ctx.get_option_chain(code=stock_code, data_filter=filter_put, option_type=OptionType.PUT)
+        ret2, data2 = quote_ctx.get_option_chain(
+            code=stock_code, data_filter=filter_call, option_type=OptionType.CALL
+        )
+        ret3, data3 = quote_ctx.get_option_chain(
+            code=stock_code, data_filter=filter_put, option_type=OptionType.PUT
+        )
 
-        cc = data2['code'].tolist() if ret2 == RET_OK and not data2.empty else []
-        pp = data3['code'].tolist() if ret3 == RET_OK and not data3.empty else []
+        cc = data2["code"].tolist() if ret2 == RET_OK and not data2.empty else []
+        pp = data3["code"].tolist() if ret3 == RET_OK and not data3.empty else []
 
         if not cc or not pp:
             log_fn(f"{stock_code} 無有效期權代碼")
@@ -79,22 +151,40 @@ def process_stock(quote_ctx, stock_code, log_fn: Callable[[str], None] = console
             log_fn(f"{stock_code} 市場快照取得失敗")
             return append_zero_row(stock_code)
 
-        aaac = datac[['stock_owner', 'code', 'turnover', 'option_implied_volatility', 'option_type']]
-        aaap = datap[['stock_owner', 'code', 'turnover', 'option_implied_volatility', 'option_type']]
+        aaac = datac[
+            [
+                "stock_owner",
+                "code",
+                "turnover",
+                "option_implied_volatility",
+                "option_type",
+            ]
+        ]
+        aaap = datap[
+            [
+                "stock_owner",
+                "code",
+                "turnover",
+                "option_implied_volatility",
+                "option_type",
+            ]
+        ]
 
-        stock_owner = aaac['stock_owner'].iloc[0]
-        turnoverc = aaac['turnover'].iloc[1:].astype(int).sum()
-        turnoverp = aaap['turnover'].iloc[1:].astype(int).sum()
-        ivc = aaac['option_implied_volatility'].iloc[1:].astype(float).mean()
-        ivp = aaap['option_implied_volatility'].iloc[1:].astype(float).mean()
+        stock_owner = aaac["stock_owner"].iloc[0]
+        turnoverc = aaac["turnover"].iloc[1:].astype(int).sum()
+        turnoverp = aaap["turnover"].iloc[1:].astype(int).sum()
+        ivc = aaac["option_implied_volatility"].iloc[1:].astype(float).mean()
+        ivp = aaap["option_implied_volatility"].iloc[1:].astype(float).mean()
 
-        df_row = pd.DataFrame({
-            'stock': [stock_owner],
-            'turnoverc': [turnoverc],
-            'turnoverp': [turnoverp],
-            'ivc': [ivc],
-            'ivp': [ivp]
-        })
+        df_row = pd.DataFrame(
+            {
+                "stock": [stock_owner],
+                "turnoverc": [turnoverc],
+                "turnoverp": [turnoverp],
+                "ivc": [ivc],
+                "ivp": [ivp],
+            }
+        )
 
         return df_row.infer_objects(copy=False)
 
@@ -113,7 +203,10 @@ def run_once(
 
     init_futu_encryption(log_fn)
 
-    quote_ctx = OpenQuoteContext(host=FUTU_HOST, port=FUTU_PORT)
+    quote_ctx = create_quote_context_with_retry(log_fn)
+    if quote_ctx is None:
+        log_fn("無法建立 Futu 連線，全域重試已耗盡。請稍後再試或聯繫富途客服。")
+        return
 
     wks = None
     if update_sheets:
@@ -121,7 +214,7 @@ def run_once(
         try:
             gc = pygsheets.authorize(service_file=SERVICE_FILE)
             sh = gc.open(SHEET_NAME)
-            wks = sh.worksheet('title', WORKSHEET_TITLE)
+            wks = sh.worksheet("title", WORKSHEET_TITLE)
         except Exception as e:
             log_fn(f"Google Sheets 授權失敗：{e}")
             quote_ctx.close()
@@ -129,8 +222,8 @@ def run_once(
 
     # 讀取股票清單
     try:
-        stock_data = pd.read_csv('/app/20241205stocklist.csv')
-        stock_list = stock_data['stock'].tolist()
+        stock_data = pd.read_csv("/app/20241205stocklist.csv")
+        stock_list = stock_data["stock"].tolist()
     except Exception as e:
         log_fn(f"讀取 CSV 錯誤：{e}")
         quote_ctx.close()
@@ -146,13 +239,15 @@ def run_once(
             log_fn(f"測試模式：只跑前 {limit_int} 支股票")
 
     # 初始化結果表格，強制指定欄位型別
-    df_result = pd.DataFrame({
-        'stock': pd.Series(dtype='str'),
-        'turnoverc': pd.Series(dtype='int'),
-        'turnoverp': pd.Series(dtype='int'),
-        'ivc': pd.Series(dtype='float'),
-        'ivp': pd.Series(dtype='float')
-    })
+    df_result = pd.DataFrame(
+        {
+            "stock": pd.Series(dtype="str"),
+            "turnoverc": pd.Series(dtype="int"),
+            "turnoverp": pd.Series(dtype="int"),
+            "ivc": pd.Series(dtype="float"),
+            "ivp": pd.Series(dtype="float"),
+        }
+    )
 
     for idx, stock_code in enumerate(stock_list, start=1):
         log_fn(f"處理第 {idx}/{len(stock_list)} 支股票：{stock_code}")
@@ -226,7 +321,7 @@ def run_scheduler(
 
 def try_run_gui() -> bool:
     """Run the Tkinter window if available. Returns True if GUI started."""
-    if os.getenv('FUTU_GUI', '0') not in ('1', 'true', 'TRUE', 'yes', 'YES'):
+    if os.getenv("FUTU_GUI", "0") not in ("1", "true", "TRUE", "yes", "YES"):
         return False
 
     try:
@@ -236,7 +331,7 @@ def try_run_gui() -> bool:
         console_log(f"GUI 啟動失敗（tkinter 不可用）：{e}")
         return False
 
-    if os.name != 'nt' and not os.getenv('DISPLAY'):
+    if os.name != "nt" and not os.getenv("DISPLAY"):
         console_log("GUI 未啟動：找不到 DISPLAY（可能在 Docker/無視窗環境）")
         return False
 
@@ -297,7 +392,11 @@ def try_run_gui() -> bool:
 
     worker = threading.Thread(
         target=run_scheduler,
-        kwargs={"log_fn": gui_log, "publish_result_fn": gui_publish_result, "stop_event": stop_event},
+        kwargs={
+            "log_fn": gui_log,
+            "publish_result_fn": gui_publish_result,
+            "stop_event": stop_event,
+        },
         daemon=True,
     )
     worker.start()
@@ -307,7 +406,7 @@ def try_run_gui() -> bool:
     return True
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # If GUI is enabled and available, it will run the scheduler in a background thread.
     if try_run_gui():
         raise SystemExit(0)

@@ -46,6 +46,9 @@ services:
       - WORKSHEET_TITLE=Today
       - TARGET_HOUR=04
       - TARGET_MINUTE=00
+      - RETRY_MAX_ATTEMPTS=3
+      - RETRY_INITIAL_DELAY=30
+      - RETRY_MAX_DELAY=3600
     volumes:
       - ./futu.pem:/.futu/futu.pem:ro
       - ./OptionPython/service_account.json:/app/service_account.json:ro
