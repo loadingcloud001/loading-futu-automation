@@ -4,17 +4,27 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      confirm_deploy:
+        description: 'Type "deploy" to confirm production deployment'
+        required: false
+
+env:
+  SERVICE_PATH: /opt/loading-futu-automation
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: production
+    timeout-minutes: 15
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup SSH key
-        uses: shimataro/ssh-key-action@v2
+        uses: shimataro/ssh-key-action@v2.1.0
         with:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           known_hosts: ${{ secrets.KNOWN_HOSTS }}
@@ -24,18 +34,27 @@ jobs:
           FUTU_ACCOUNT_ID: ${{ secrets.FUTU_ACCOUNT_ID }}
           FUTU_ACCOUNT_PWD: ${{ secrets.FUTU_ACCOUNT_PWD }}
         run: |
+          if [ -z "$FUTU_ACCOUNT_ID" ] || [ -z "$FUTU_ACCOUNT_PWD" ]; then
+            echo "ERROR: FUTU_ACCOUNT_ID or FUTU_ACCOUNT_PWD is empty"
+            exit 1
+          fi
           printf 'FUTU_ACCOUNT_ID=%s\nFUTU_ACCOUNT_PWD=%s\n' "$FUTU_ACCOUNT_ID" "$FUTU_ACCOUNT_PWD" > .env
 
       - name: Create FutuOpenD.xml
         env:
           FUTU_ACCOUNT_ID: ${{ secrets.FUTU_ACCOUNT_ID }}
+          FUTU_ACCOUNT_PWD_MD5: ${{ secrets.FUTU_ACCOUNT_PWD_MD5 }}
         run: |
+          if [ -z "$FUTU_ACCOUNT_PWD_MD5" ]; then
+            echo "ERROR: FUTU_ACCOUNT_PWD_MD5 secret is not set"
+            exit 1
+          fi
           printf '%s\n' \
             '<futu_opend>' \
             '  <ip>0.0.0.0</ip>' \
             '  <api_port>11111</api_port>' \
             "  <login_account>$FUTU_ACCOUNT_ID</login_account>" \
-            '  <login_pwd_md5>e60fb8ff518391fc726cb414d8c3b23c</login_pwd_md5>' \
+            "  <login_pwd_md5>$FUTU_ACCOUNT_PWD_MD5</login_pwd_md5>" \
             '  <lang>chs</lang>' \
             '  <log_level>info</log_level>' \
             '  <push_proto_type>0</push_proto_type>' \
@@ -48,33 +67,60 @@ jobs:
             '  <pdt_protection>1</pdt_protection>' \
             '  <dtcall_confirmation>1</dtcall_confirmation>' \
             '</futu_opend>' > FutuOpenD.xml
+          echo "FutuOpenD.xml created successfully"
 
       - name: Create service_account.json
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: |
+          if [ -z "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
+            echo "ERROR: GOOGLE_SERVICE_ACCOUNT_JSON is empty"
+            exit 1
+          fi
           echo "$GOOGLE_SERVICE_ACCOUNT_JSON" | base64 -d > service_account.json
+          # Validate JSON
+          python3 -c "import json; json.load(open('service_account.json'))" || {
+            echo "ERROR: Invalid JSON in service_account.json"
+            rm -f service_account.json
+            exit 1
+          }
+          echo "service_account.json validated successfully"
 
       - name: Deploy to DO002
         env:
           SSH_HOST: ${{ secrets.DO002_HOST }}
         run: |
-          ssh -o StrictHostKeyChecking=no root@$SSH_HOST "mkdir -p /opt/loading-futu-automation"
+          if [ -z "$SSH_HOST" ]; then
+            echo "ERROR: SSH_HOST is empty"
+            exit 1
+          fi
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@$SSH_HOST "mkdir -p $SERVICE_PATH"
           rsync -avz --exclude='.git' --exclude='.secrets' \
-            -e "ssh -o StrictHostKeyChecking=no" \
-            ./ root@$SSH_HOST:/opt/loading-futu-automation/
+            -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+            ./ root@$SSH_HOST:$SERVICE_PATH/
 
       - name: Start containers on remote
         env:
           SSH_HOST: ${{ secrets.DO002_HOST }}
         run: |
-          ssh -o StrictHostKeyChecking=no root@$SSH_HOST << 'ENDSSH'
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@$SSH_HOST << 'ENDSSH'
             set -e
-            cd /opt/loading-futu-automation
+            
+            cd $SERVICE_PATH
+            
+            # Stop containers but don't fail if they don't exist
             docker rm -f futu-opend option-python 2>/dev/null || true
-            docker pull manhinhang/futu-opend-docker:ubuntu-stable
+            
+            # Pull latest image
+            docker pull manhinhang/futu-opend-docker:ubuntu-stable || {
+              echo "WARNING: Failed to pull image, using local cache"
+            }
+            
+            # Create network
             docker network rm loading-futu-automation_futu-net 2>/dev/null || true
             docker network create loading-futu-automation_futu-net
+            
+            # Start futu-opend
             docker run -d \
               --name futu-opend \
               --restart unless-stopped \
@@ -82,7 +128,6 @@ jobs:
               -e FUTU_OPEND_IP=0.0.0.0 \
               -e FUTU_OPEND_PORT=11111 \
               -e FUTU_OPEND_RSA_FILE_PATH= \
-              -e FUTU_ACCOUNT_PWD_MD5=e60fb8ff518391fc726cb414d8c3b23c \
               -v /opt/loading-futu-automation/FutuOpenD.xml:/FutuOpenD.xml \
               -v /opt/loading-futu-automation/start.sh:/bin/start.sh \
               -v futu-opend-data:/.futu \
@@ -90,8 +135,17 @@ jobs:
               -p 22222:22222 \
               --network loading-futu-automation_futu-net \
               manhinhang/futu-opend-docker:ubuntu-stable
+            
             sleep 5
-            docker build -t option-python ./OptionPython
+            
+            # Build option-python with cache
+            docker build --cache-from=option-python:previous -t option-python ./OptionPython || \
+              docker build -t option-python ./OptionPython
+            
+            # Tag for cache
+            docker tag option-python:latest option-python:previous 2>/dev/null || true
+            
+            # Start option-python
             docker run -d \
               --name option-python \
               --restart unless-stopped \
@@ -104,6 +158,8 @@ jobs:
               -e RETRY_MAX_DELAY=3600 \
               -v /opt/loading-futu-automation/OptionPython/service_account.json:/app/service_account.json:ro \
               option-python
+            
+            echo "Container startup complete"
             docker ps --filter "name=futu-opend" --filter "name=option-python"
           ENDSSH
 
@@ -111,4 +167,23 @@ jobs:
         env:
           SSH_HOST: ${{ secrets.DO002_HOST }}
         run: |
-          ssh -o StrictHostKeyChecking=no root@$SSH_HOST "docker ps --filter 'name=futu-opend' --filter 'name=option-python'"
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@$SSH_HOST << 'ENDSSH'
+            echo "=== Container Status ==="
+            docker ps --format '{{.Names}}: {{.Status}}'
+            
+            echo ""
+            echo "=== API Health Check ==="
+            HTTP_CODE=$(curl -f -s -o /dev/null -w '%{http_code}' http://localhost:11111 2>/dev/null || echo "000")
+            echo "API response code: $HTTP_CODE"
+            
+            if [ "$HTTP_CODE" = "000" ]; then
+              echo "WARNING: API is not responding"
+              exit 1
+            fi
+          ENDSSH
+
+      - name: Cleanup SSH keys
+        if: always()
+        run: |
+          rm -rf ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub
+          echo "SSH keys cleaned up"

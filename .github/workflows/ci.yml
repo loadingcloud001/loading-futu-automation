@@ -6,12 +6,21 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
       - name: Validate docker compose
         run: |
@@ -24,7 +33,7 @@ jobs:
 
       - name: Validate Python syntax
         run: |
-          python3 -m py_compile OptionPython/app.py
+          python -m py_compile OptionPython/app.py
           echo "Python syntax is valid"
 
       - name: Check retry configuration
@@ -40,3 +49,12 @@ jobs:
           grep -q "PHONE_VERIFY_BLOCK_KEYWORDS" OptionPython/app.py && echo "✓ Block keywords defined"
           grep -q "is_phone_verification_blocked" OptionPython/app.py && echo "✓ Block detection function exists"
           grep -q "exponential_backoff_retry" OptionPython/app.py && echo "✓ Exponential backoff function exists"
+
+      - name: Check for leaked secrets
+        run: |
+          echo "Scanning for potential leaked secrets..."
+          if grep -rE "ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9]{20,}" . --include="*.yml" --include="*.yaml" --include="*.env" 2>/dev/null; then
+            echo "ERROR: Potential GitHub token found in code!"
+            exit 1
+          fi
+          echo "✓ No leaked secrets detected"
