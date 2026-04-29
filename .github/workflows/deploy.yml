@@ -103,11 +103,90 @@ jobs:
             -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
             ./ root@$SSH_HOST:$SERVICE_PATH/
 
-      - name: Start containers on remote
+      - name: Prepare images and network (non-destructive)
         env:
           SSH_HOST: ${{ secrets.DO002_HOST }}
         run: |
-          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@$SSH_HOST 'cd /opt/loading-futu-automation && docker rm -f futu-opend option-python 2>/dev/null || true && docker pull manhinhang/futu-opend-docker:ubuntu-stable && docker network rm loading-futu-automation_futu-net 2>/dev/null || true && docker network create loading-futu-automation_futu-net && docker run -d --name futu-opend --restart unless-stopped --env-file .env -e FUTU_OPEND_IP=0.0.0.0 -e FUTU_OPEND_PORT=11111 -e FUTU_OPEND_RSA_FILE_PATH= -v /opt/loading-futu-automation/FutuOpenD.xml:/FutuOpenD.xml -v /opt/loading-futu-automation/start.sh:/bin/start.sh -v futu-opend-data:/.futu -p 11111:11111 -p 22222:22222 --network loading-futu-automation_futu-net manhinhang/futu-opend-docker:ubuntu-stable && sleep 5 && docker build -t option-python /opt/loading-futu-automation/OptionPython && docker run -d --name option-python --restart unless-stopped --env-file .env --network loading-futu-automation_futu-net -e FUTU_OPEND_IP=futu-opend -e FUTU_OPEND_PORT=11111 -e RETRY_MAX_ATTEMPTS=3 -e RETRY_INITIAL_DELAY=30 -e RETRY_MAX_DELAY=3600 -v /opt/loading-futu-automation/OptionPython/service_account.json:/app/service_account.json:ro option-python && echo "Container startup complete" && docker ps --filter name=futu-opend --filter name=option-python'
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@$SSH_HOST << 'ENDSSH'
+            set -e
+            cd /opt/loading-futu-automation
+
+            echo "=== Ensuring network exists ==="
+            docker network inspect loading-futu-automation_futu-net >/dev/null 2>&1 || \
+              docker network create loading-futu-automation_futu-net
+            echo "Network ready"
+
+            echo "=== Pulling futu-opend image ==="
+            docker pull manhinhang/futu-opend-docker:ubuntu-stable
+            echo "futu-opend image ready"
+
+            echo "=== Building option-python image ==="
+            docker build -t option-python OptionPython
+            echo "option-python image ready"
+          ENDSSH
+
+      - name: Deploy futu-opend
+        env:
+          SSH_HOST: ${{ secrets.DO002_HOST }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@$SSH_HOST << 'ENDSSH'
+            set -e
+            cd /opt/loading-futu-automation
+
+            echo "=== Stopping old futu-opend ==="
+            docker rm -f futu-opend 2>/dev/null || true
+
+            echo "=== Starting futu-opend ==="
+            docker run -d --name futu-opend \
+              --restart unless-stopped \
+              --env-file .env \
+              -e FUTU_OPEND_IP=0.0.0.0 \
+              -e FUTU_OPEND_PORT=11111 \
+              -e FUTU_OPEND_RSA_FILE_PATH= \
+              -v /opt/loading-futu-automation/FutuOpenD.xml:/FutuOpenD.xml \
+              -v /opt/loading-futu-automation/start.sh:/bin/start.sh \
+              -v futu-opend-data:/.futu \
+              -p 11111:11111 \
+              -p 22222:22222 \
+              --network loading-futu-automation_futu-net \
+              manhinhang/futu-opend-docker:ubuntu-stable
+
+            echo "=== Waiting for futu-opend to initialize ==="
+            sleep 5
+
+            echo "=== Verifying futu-opend ==="
+            docker ps --filter name=futu-opend --filter status=running --format "futu-opend is {{.Status}}"
+            echo "futu-opend deployed successfully"
+          ENDSSH
+
+      - name: Deploy option-python
+        env:
+          SSH_HOST: ${{ secrets.DO002_HOST }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@$SSH_HOST << 'ENDSSH'
+            set -e
+            cd /opt/loading-futu-automation
+
+            echo "=== Stopping old option-python ==="
+            docker rm -f option-python 2>/dev/null || true
+
+            echo "=== Starting option-python ==="
+            docker run -d --name option-python \
+              --restart unless-stopped \
+              --env-file .env \
+              --network loading-futu-automation_futu-net \
+              -e FUTU_OPEND_IP=futu-opend \
+              -e FUTU_OPEND_PORT=11111 \
+              -e RETRY_MAX_ATTEMPTS=3 \
+              -e RETRY_INITIAL_DELAY=30 \
+              -e RETRY_MAX_DELAY=3600 \
+              -v /opt/loading-futu-automation/OptionPython/service_account.json:/app/service_account.json:ro \
+              option-python
+
+            echo "=== Verifying option-python ==="
+            docker ps --filter name=option-python --filter status=running --format "option-python is {{.Status}}"
+            echo "option-python deployed successfully"
+          ENDSSH
 
       - name: Verify deployment
         env:
