@@ -9,4 +9,4 @@ COPY . .
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-u", "/app/app.py"]
+CMD ["python3", "/app/app.py"]
