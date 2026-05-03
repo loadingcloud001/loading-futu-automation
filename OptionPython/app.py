@@ -164,6 +164,10 @@ def run_once(
     except Exception as e:
         log_fn(f"批次報價失敗：{e}")
         return
+    
+    # Filter to active stocks (those with price data - Futu supports them)
+    active_stocks = [s for s, q in stock_quotes.items() if q.get('last_price', 0) > 0]
+    log_fn(f"Active stocks with data: {len(active_stocks)}/{len(stock_list)}")
 
     # 初始化結果表格
     df_result = pd.DataFrame(
@@ -178,7 +182,7 @@ def run_once(
         }
     )
 
-    for idx, stock_code in enumerate(stock_list, start=1):
+    for idx, stock_code in enumerate(active_stocks, start=1):
         log_fn(f"處理第 {idx}/{len(stock_list)} 支股票：{stock_code}")
         df_row = process_stock(stock_code, stock_quotes, log_fn=log_fn)
         df_result = pd.concat([df_result, df_row], ignore_index=True)
