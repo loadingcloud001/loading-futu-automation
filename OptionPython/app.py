@@ -151,15 +151,21 @@ def run_once(
             stock_list = stock_list[:limit_int]
             log_fn(f"測試模式：只跑前 {limit_int} 支股票")
 
-    # Batch fetch stock quotes (1 API call for ALL stocks)
-    log_fn(f"批次取得 {len(stock_list)} 支股票報價...")
+    # Batch fetch stock quotes (50 per call, 1s delay)
+    log_fn(f"批次取得 {len(stock_list)} 支股票報價 (50 per chunk)...")
     stock_quotes = {}
-    try:
-        stock_quotes = get_quotes_batch(stock_list)
-        log_fn(f"取得 {len(stock_quotes)} 支股票報價")
-    except Exception as e:
-        log_fn(f"批次報價失敗：{e}")
-        return
+    chunk_size = 50
+    for i in range(0, len(stock_list), chunk_size):
+        chunk = stock_list[i:i+chunk_size]
+        try:
+            quotes = get_quotes_batch(chunk)
+            stock_quotes.update(quotes)
+        except Exception as e:
+            log_fn(f"Chunk {i//chunk_size+1} failed: {e}")
+        if i % 200 == 0 and i > 0:
+            log_fn(f"  Progress: {len(stock_quotes)} quotes from {i} stocks")
+        time.sleep(1)
+    log_fn(f"取得 {len(stock_quotes)}/{len(stock_list)} 支股票報價")
     
     # Filter to active stocks, sort by turnover (most active first)
     active_with_turnover = [(s, q.get('turnover', 0) or 0) for s, q in stock_quotes.items() if q.get('last_price', 0) > 0]
