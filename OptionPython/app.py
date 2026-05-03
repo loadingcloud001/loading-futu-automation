@@ -13,18 +13,15 @@ from stock_api_client import (
     get_quotes_batch,
     get_option_chain,
     get_macd,
-    get_rsi,
 )
 
 # === 設定參數 ===
 SERVICE_FILE = os.getenv("SERVICE_FILE", "/app/service_account.json")
 SHEET_NAME = os.getenv("SHEET_NAME", "LID Risk Management")
 WORKSHEET_TITLE = os.getenv("WORKSHEET_TITLE", "Today")
-EXCEL_PATH = os.getenv("EXCEL_PATH", "/app/20241205stocklist.xlsx")
 CSV_PATH = os.getenv("CSV_PATH", "/app/20241205optionresults.csv")
 TARGET_HOUR = os.getenv("TARGET_HOUR", "04").zfill(2)
 TARGET_MINUTE = os.getenv("TARGET_MINUTE", "00").zfill(2)
-RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "3"))
 
 
 # === 工具函式 ===
@@ -45,6 +42,7 @@ def append_zero_row(stock_code, stock_price=0):
             "ivc": [0.0],
             "ivp": [0.0],
             "stock_price": [stock_price],
+            "macd": [0.0],
         }
     )
     return df_zero.infer_objects(copy=False)
@@ -192,7 +190,7 @@ def run_once(
         log_fn(f"處理第 {idx}/{len(stock_list)} 支股票：{stock_code}")
         df_row = process_stock(stock_code, stock_quotes, log_fn=log_fn)
         df_result = pd.concat([df_result, df_row], ignore_index=True)
-        time.sleep(0.3)  # Rate limit: ~3 calls/sec
+        time.sleep(2.0)  # Rate limit: 100 req/min API
 
     log_fn(f"所有股票處理完成，共 {len(df_result)} 筆資料")
 

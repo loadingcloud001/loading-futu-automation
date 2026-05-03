@@ -72,7 +72,9 @@ def compute_metrics(today_data: dict, yesterday_data: dict,
     today_str = date.today().strftime("%Y-%m-%d")
     results = []
 
-    for stock, (tc, tp, ivc, ivp) in today_data.items():
+    for stock, values in today_data.items():
+        if len(values) >= 5: tc, tp, ivc, ivp, stock_price = values
+        else: tc, tp, ivc, ivp = values; stock_price = 0
         tc = int(_safe_float(tc))
         tp = int(_safe_float(tp))
         ivc = _safe_float(ivc) / 100.0  # Convert from raw to decimal
