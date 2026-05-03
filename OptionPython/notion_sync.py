@@ -134,12 +134,12 @@ def compute_metrics(today_data: dict, yesterday_data: dict,
                 # Generate Call plan
                 if ivc > 0:
                     cp = plan_trade(stock, stock_price, round(stock_price, -1) if stock_price > 50 else round(stock_price, 0),
-                                    iv_call=ivc, iv_put=ivp, is_call=True, risk_amount=182.41)
+                                    iv_call=ivc, iv_put=ivp, is_call=True, risk_amount=182.41, profit_target_pct=0.05, stop_loss_pct=-0.03, days_to_expiry=7)
                     call_plan = cp
                 # Generate Put plan
                 if ivp > 0:
                     pp = plan_trade(stock, stock_price, round(stock_price, -1) if stock_price > 50 else round(stock_price, 0),
-                                    iv_call=ivc, iv_put=ivp, is_call=False, risk_amount=182.41)
+                                    iv_call=ivc, iv_put=ivp, is_call=False, risk_amount=182.41, profit_target_pct=0.05, stop_loss_pct=-0.03, days_to_expiry=7)
                     put_plan = pp
             except Exception:
                 pass
@@ -268,6 +268,9 @@ def sync_daily_snapshot(metrics: list, log_fn=None) -> int:
             "Anomaly": select_val(m["anomaly"]),
             "Direction Signal": select_val(m.get("direction_signal", "⚖️ 平衡")),
             "My Decision": select_val("⏳ 待分析"),
+            "My Target %": number_val(0.05),
+            "My Stop %": number_val(-0.03),
+            "My Days": number_val(7),
             "Notes": rich_text_val(""),
         }
         items.append(props)
