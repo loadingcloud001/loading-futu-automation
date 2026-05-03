@@ -1,146 +1,113 @@
-"""Intraday Options Monitor - polls Futu API during market hours for real-time alerts.
+"""Intraday Options Monitor - polls Stock API during US market hours for real-time alerts.
 
-Detects:
-  - Sudden IV spikes (>20% in 30 min)
-  - Turnover bursts (>3x normal rate)  
-  - P/C ratio flips (sentiment change)
-
-Writes alerts to Notion Alerts database instead of Telegram.
-Can run as a separate process alongside app.py scheduler.
+Uses stockapi.loadingtechnology.app (NOT Futu SDK directly).
+Detects: turnover bursts, price moves during market hours.
+Writes alerts to Notion Alerts database.
 """
-
-import os
-import sys
-import time
-import json
+import os, sys, time
 from datetime import datetime, time as dtime
-from collections import defaultdict
-from typing import Optional, Callable
+from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from stock_api_client import get_quotes_batch
 from notion_client import (
-    title_val, rich_text_val, number_val, date_val, select_val,
-    add_page,
+    add_page, title_val, rich_text_val, number_val, date_val, select_val,
 )
 
 # Notion Alerts DB ID
 ALERTS_DB_ID = "3551f5d1-7d2f-8131-aa04-eb9101e044d0"
 
-# US market hours in HKT (UTC+8)
-# Regular: 21:30 - 04:00 (summer) / 22:30 - 05:00 (winter)
-MARKET_OPEN_HKT = dtime(21, 30)
-MARKET_CLOSE_HKT = dtime(4, 0)
-
 # Alert thresholds
-IV_SPIKE_PCT = 20       # IV up 20% from baseline
-TURNOVER_BURST_X = 3.0  # Turnover 3x baseline rate
-PC_RATIO_FLIP = 2.0     # P/C ratio crosses this threshold
+TURNOVER_BURST_RATIO = 3.0
+PRICE_MOVE_PCT = 3.0
 
 
 def is_market_hours() -> bool:
     """Check if US market is currently open (in HKT)."""
-    now = datetime.now().time()
-    # Market open 21:30 - 04:00 next day
-    if now >= MARKET_OPEN_HKT or now <= MARKET_CLOSE_HKT:
-        return True
-    return False
+    now = datetime.now()
+    h = now.hour
+    m = now.minute
+    # US market in HKT: ~21:30-04:00 (summer), ~22:30-05:00 (winter)
+    # Simple check: between 21:00 and 05:00
+    return h >= 21 or h < 5
 
 
-def compute_baseline(quote_ctx, stock_codes: list) -> dict:
-    """Get baseline metrics for watchlist stocks at market open.
-    
-    Returns {stock_code: {turnover, ivc, ivp, pc_ratio}}
-    """
-    baseline = {}
-    for code in stock_codes:
-        try:
-            ret, data = quote_ctx.get_market_snapshot([code])
-            if ret == 0 and not data.empty:  # RET_OK = 0 in futu
-                baseline[code] = {
-                    'turnover': float(data.get('turnover', [0])[0] or 0),
-                    'ivc': float(data.get('option_implied_volatility', [0])[0] or 0),
-                    'ivp': float(data.get('option_implied_volatility', [0])[0] or 0),
-                    'last_price': float(data.get('last_price', [0])[0] or 0),
-                }
-        except Exception:
-            continue
-    return baseline
+def fetch_baseline(watchlist: list) -> dict:
+    """Get baseline data for watchlist stocks."""
+    try:
+        quotes = get_quotes_batch(watchlist)
+        baseline = {}
+        for s, q in quotes.items():
+            baseline[s] = {
+                'last_price': q.get('last_price', 0) or 0,
+                'turnover': q.get('turnover', 0) or 0,
+            }
+        return baseline
+    except Exception:
+        return {}
 
 
-def scan_for_alerts(
-    quote_ctx,
-    watchlist: list,
-    baseline: dict,
-    log_fn: Callable = print,
-) -> list:
-    """Scan watchlist for intraday anomalies.
-    
-    Returns list of alert dicts.
-    """
+def scan_for_alerts(watchlist: list, baseline: dict, log_fn: Callable = print) -> list:
+    """Scan watchlist for intraday anomalies using Stock API."""
     alerts = []
     
+    try:
+        current = get_quotes_batch(watchlist)
+    except Exception:
+        return alerts
+    
     for code in watchlist:
-        try:
-            ret, data = quote_ctx.get_market_snapshot([code])
-            if ret != 0 or data.empty:
-                continue
-            
-            current = {
-                'turnover': float(data.get('turnover', [0])[0] or 0),
-                'last_price': float(data.get('last_price', [0])[0] or 0),
-            }
-            
-            bl = baseline.get(code, {})
-            if not bl:
-                continue
-            
-            # Check turnover burst
-            if bl.get('turnover', 0) > 0:
-                burst_ratio = current['turnover'] / bl['turnover']
-                if burst_ratio > TURNOVER_BURST_X:
-                    alerts.append({
-                        'stock': code,
-                        'type': '🔥 Turnover Burst',
-                        'severity': '🔴 High',
-                        'message': f'{code} turnover {burst_ratio:.1f}x baseline',
-                        'value': round(burst_ratio, 1),
-                        'price': current['last_price'],
-                    })
-            
-            # Check price move
-            if bl.get('last_price', 0) > 0:
-                price_change = (current['last_price'] - bl['last_price']) / bl['last_price'] * 100
-                if abs(price_change) > 3:
-                    direction = '📈' if price_change > 0 else '📉'
-                    alerts.append({
-                        'stock': code,
-                        'type': f'{direction} Price Move',
-                        'severity': '🟡 Medium' if abs(price_change) < 5 else '🔴 High',
-                        'message': f'{code} {price_change:+.1f}%',
-                        'value': round(price_change, 1),
-                        'price': current['last_price'],
-                    })
-                    
-        except Exception:
+        cur = current.get(code, {})
+        bl = baseline.get(code, {})
+        if not cur or not bl:
             continue
+        
+        cur_price = cur.get('last_price', 0) or 0
+        cur_turnover = cur.get('turnover', 0) or 0
+        bl_price = bl.get('last_price', 0) or 0
+        bl_turnover = bl.get('turnover', 0) or 0
+        
+        # Check turnover burst
+        if bl_turnover > 0 and cur_turnover / bl_turnover > TURNOVER_BURST_RATIO:
+            alerts.append({
+                'stock': code,
+                'type': '🔥 Turnover Burst',
+                'severity': '🔴 High',
+                'message': f'{code} turnover {cur_turnover/bl_turnover:.1f}x baseline',
+                'value': round(cur_turnover / bl_turnover, 1),
+                'price': cur_price,
+            })
+        
+        # Check price move
+        if bl_price > 0:
+            pct = (cur_price - bl_price) / bl_price * 100
+            if abs(pct) > PRICE_MOVE_PCT:
+                direction = '📈' if pct > 0 else '📉'
+                alerts.append({
+                    'stock': code,
+                    'type': f'{direction} Price Move',
+                    'severity': '🟡 Medium' if abs(pct) < 5 else '🔴 High',
+                    'message': f'{code} {pct:+.1f}%',
+                    'value': round(pct, 1),
+                    'price': cur_price,
+                })
     
     return alerts
 
 
-def write_alerts_to_notion(alerts: list, db_id: str) -> int:
-    """Write alerts to Notion Alerts database.
-    
-    Returns number of alerts written.
-    """
+def write_alerts(alerts: list, db_id: str = None) -> int:
+    """Write alerts to Notion Alerts database."""
     if not db_id:
+        db_id = ALERTS_DB_ID
+    if not alerts or not db_id:
         return 0
     
     count = 0
-    for alert in alerts:
+    for alert in alerts[:10]:  # Max 10 to avoid flooding
         try:
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
-            props = {
+            add_page(db_id, {
                 'Alert': title_val(f'{timestamp} - {alert["stock"]}'),
                 'Date': date_val(datetime.now().strftime('%Y-%m-%d')),
                 'Stock': rich_text_val(alert['stock']),
@@ -149,8 +116,7 @@ def write_alerts_to_notion(alerts: list, db_id: str) -> int:
                 'Message': rich_text_val(alert['message']),
                 'Value': number_val(alert.get('value', 0)),
                 'Price': number_val(alert.get('price', 0)),
-            }
-            add_page(db_id, props)
+            })
             count += 1
         except Exception:
             pass
@@ -158,51 +124,20 @@ def write_alerts_to_notion(alerts: list, db_id: str) -> int:
     return count
 
 
-def run_intraday_monitor(
-    quote_ctx,
-    watchlist: list,
-    db_id: str = None,
-    interval_seconds: int = 900,  # 15 min
-    log_fn: Callable = print,
-    stop_event=None,
-):
-    """Run intraday monitoring loop.
+def quick_scan(watchlist: list, log_fn: Callable = print) -> int:
+    """Single scan: fetch quotes, detect alerts, write to Notion.
     
-    Call this from a separate thread/process during market hours.
+    Returns number of alerts written.
     """
-    log_fn(f"Intraday monitor starting. Watchlist: {len(watchlist)} stocks, interval: {interval_seconds}s")
+    baseline = fetch_baseline(watchlist)
+    if not baseline:
+        log_fn("Intraday: no baseline data")
+        return 0
     
-    # Get baseline at start
-    baseline = compute_baseline(quote_ctx, watchlist)
-    log_fn(f"Baseline captured for {len(baseline)} stocks")
-    
-    while True:
-        if stop_event and stop_event.is_set():
-            break
-        
-        if not is_market_hours():
-            log_fn("Market closed. Waiting...")
-            time.sleep(300)
-            continue
-        
-        alerts = scan_for_alerts(quote_ctx, watchlist, baseline, log_fn)
-        
-        if alerts:
-            log_fn(f"Found {len(alerts)} alerts!")
-            for a in alerts:
-                log_fn(f"  {a['severity']} {a['type']}: {a['message']}")
-            
-            if db_id:
-                written = write_alerts_to_notion(alerts, db_id)
-                log_fn(f"  Written {written} alerts to Notion")
-            
-            # Update baseline after alerts to avoid re-triggering
-            baseline = compute_baseline(quote_ctx, watchlist)
-        
-        # Sleep in chunks for clean shutdown
-        for _ in range(interval_seconds):
-            if stop_event and stop_event.is_set():
-                break
-            time.sleep(1)
-    
-    log_fn("Intraday monitor stopped")
+    alerts = scan_for_alerts(watchlist, baseline, log_fn)
+    if alerts:
+        log_fn(f"Intraday: {len(alerts)} alerts found")
+        written = write_alerts(alerts)
+        log_fn(f"Intraday: {written} written to Notion")
+        return written
+    return 0
