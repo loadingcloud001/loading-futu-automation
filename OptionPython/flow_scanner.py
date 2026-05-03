@@ -1,184 +1,135 @@
-"""Options Flow Scanner - detects unusual single-strike options activity.
+"""Options Flow Scanner - detects unusual single-strike options activity using Stock API.
 
-Goes beyond aggregate CALL/PUT turnover to identify specific strikes with:
-  - Volume > 2x Open Interest (fresh positions)
+Flags:
+  - Volume > 2x Open Interest (fresh positions being opened)
   - Turnover > 5x stock's median contract turnover
-  - Large premium sweeps (>$1M in a single strike)
+  - Premium > $500K in a single strike (large directional bet)
 
-Writes findings to Notion Flow Alerts database.
+Used at end of daily run to scan top stocks for unusual flow.
 """
-
-import os
-import sys
-import time
-from collections import defaultdict
-from typing import Optional, Callable
+import time, sys, os
+from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from stock_api_client import get_option_chain
 from notion_client import (
-    title_val, rich_text_val, number_val, date_val, select_val,
-    add_page,
+    add_page, title_val, rich_text_val, number_val, date_val, select_val,
+    FLOW_DB_ID,
 )
 
-# Notion Flow Alerts DB ID
-FLOW_DB_ID = "3551f5d1-7d2f-81f7-ba27-d1a75ad51717"
 
-
-def scan_option_flow(
-    quote_ctx,
-    stock_code: str,
-    log_fn: Callable = print,
-    vol_min: int = 50,
-    delta_range: tuple = (0.01, 0.99),
-    volume_oi_ratio_threshold: float = 2.0,
-    premium_threshold: float = 500000,  # $500K
-) -> list:
-    """Scan unusual options flow for a single stock.
+def scan_stock_flow(stock_code: str, vol_oi_threshold: float = 2.0,
+                    premium_threshold: float = 500000) -> list:
+    """Scan a single stock for unusual options flow.
     
-    Returns list of alert dicts for unusual strikes.
+    Returns list of alert dicts for flagged strikes.
     """
     alerts = []
     
     try:
-        from futu import OptionDataFilter, OptionType, RET_OK
-        
-        # Fetch CALL chain
-        call_filter = OptionDataFilter(
-            delta_min=delta_range[0], delta_max=delta_range[1], vol_min=vol_min
-        )
-        put_filter = OptionDataFilter(
-            delta_min=-delta_range[1], delta_max=-delta_range[0], vol_min=vol_min
-        )
-        
-        for opt_type, filt in [(OptionType.CALL, 'Call'), (OptionType.PUT, 'Put')]:
-            ret, chain = quote_ctx.get_option_chain(
-                code=stock_code, data_filter=call_filter if filt == 'Call' else put_filter,
-                option_type=opt_type
-            )
-            if ret != 0 or chain.empty:
+        for opt_type in ['CALL', 'PUT']:
+            chain = get_option_chain(stock_code, option_type=opt_type)
+            if not chain:
                 continue
             
-            codes = chain['code'].tolist()
-            if not codes:
-                continue
+            # Compute median turnover for baseline
+            turnovers = []
+            for opt in chain:
+                vol = opt.get('volume', 0) or 0
+                price = opt.get('last_price', 0) or 0
+                if vol > 0 and price > 0:
+                    turnovers.append(vol * price * 100)
             
-            # Get market snapshot for these option contracts
-            ret_snap, snap = quote_ctx.get_market_snapshot(codes)
-            if ret_snap != 0 or snap.empty:
-                continue
-            
-            # Compute median turnover for this stock's options
-            turnovers = snap['turnover'].dropna().tolist()
             if not turnovers:
                 continue
             
-            median_turnover = sorted(turnovers)[len(turnovers) // 2] if turnovers else 0
+            median_turnover = sorted(turnovers)[len(turnovers)//2]
             
-            for _, row in snap.iterrows():
-                volume = float(row.get('volume', 0) or 0)
-                turnover = float(row.get('turnover', 0) or 0)
-                oi = float(row.get('option_open_interest', 0) or 0)
-                strike = row.get('strike_price', 0)
-                expiry = str(row.get('strike_time', ''))[:10]
-                code = row.get('code', '')
+            for opt in chain:
+                volume = opt.get('volume', 0) or 0
+                if volume < 10:  # Skip low volume
+                    continue
                 
-                # Volume/Open Interest ratio
+                price = opt.get('last_price', 0) or 0
+                oi = opt.get('open_interest', 0) or 0
+                strike = opt.get('strike_price', 0) or 0
+                expiry = str(opt.get('strike_time', ''))[:10]
+                delta = opt.get('delta', 0) or 0
+                
+                turnover = volume * price * 100
                 vo_ratio = volume / oi if oi > 0 else 0
                 
-                # Turnover anomaly
-                turnover_ratio = turnover / median_turnover if median_turnover > 0 else 0
-                
                 signals = []
-                if vo_ratio > volume_oi_ratio_threshold:
+                if vo_ratio > vol_oi_threshold:
                     signals.append(f'Vol/OI={vo_ratio:.1f}x')
-                if turnover_ratio > 5:
-                    signals.append(f'Turnover={turnover_ratio:.0f}x median')
-                if abs(turnover) > premium_threshold:
-                    signals.append(f'Premium=${turnover:,.0f}')
+                if median_turnover > 0 and turnover > median_turnover * 5:
+                    signals.append(f'Turnover={turnover/median_turnover:.0f}x median')
+                if turnover > premium_threshold:
+                    signals.append(f'Premium=\${turnover:,.0f}')
                 
                 if signals:
-                    strike_price = float(row.get('strike_price', 0))
+                    direction = '📈 看多' if opt_type == 'CALL' else '📉 看空'
                     alerts.append({
                         'stock': stock_code,
-                        'option_code': code,
-                        'opt_type': filt,
-                        'strike': strike_price,
+                        'opt_type': opt_type,
+                        'strike': strike,
                         'expiry': expiry,
                         'volume': int(volume),
                         'open_interest': int(oi),
                         'vo_ratio': round(vo_ratio, 1),
                         'turnover': round(turnover, 0),
-                        'turnover_ratio': round(turnover_ratio, 1),
+                        'delta': round(delta, 3),
                         'signals': ' | '.join(signals),
-                        'direction': '📈 看多' if filt == 'Call' else '📉 看空',
+                        'direction': direction,
                     })
-            
-            time.sleep(1)  # Rate limit
-        
+                
     except Exception as e:
-        log_fn(f"Flow scan error for {stock_code}: {e}")
+        pass
     
     return alerts
 
 
-def batch_scan_flow(
-    quote_ctx,
-    stock_list: list,
-    top_n: int = 50,
-    log_fn: Callable = print,
-) -> list:
-    """Scan flow for top N stocks (by aggregate turnover) + watchlist.
-    
-    Args:
-        stock_list: list of stock codes to scan (should be pre-sorted by turnover)
-        top_n: number of top stocks to scan
-        log_fn: logging function
-    
-    Returns list of all flow alerts found.
-    """
-    top_stocks = stock_list[:top_n]
+def batch_scan(top_stocks: list, log_fn: Callable = print) -> list:
+    """Scan top N stocks for unusual flow."""
     all_alerts = []
-    
-    log_fn(f"Scanning options flow for {len(top_stocks)} stocks...")
+    log_fn(f"Flow scanner: scanning {len(top_stocks)} stocks...")
     
     for i, code in enumerate(top_stocks):
-        alerts = scan_option_flow(quote_ctx, code, log_fn=log_fn)
+        alerts = scan_stock_flow(code)
         all_alerts.extend(alerts)
-        
         if alerts:
             log_fn(f"  [{i+1}/{len(top_stocks)}] {code}: {len(alerts)} unusual strikes")
-        
-        time.sleep(0.5)  # Rate limit
+        time.sleep(0.3)
     
-    # Sort by turnover descending (most significant first)
     all_alerts.sort(key=lambda x: x['turnover'], reverse=True)
+    log_fn(f"Flow scanner: {len(all_alerts)} total alerts")
     return all_alerts
 
 
-def write_flow_alerts_to_notion(alerts: list, db_id: str) -> int:
+def write_flow_alerts(alerts: list, log_fn: Callable = print) -> int:
     """Write flow alerts to Notion Flow Alerts database."""
-    if not db_id:
+    if not FLOW_DB_ID or not alerts:
         return 0
     
     count = 0
-    for alert in alerts:
+    for alert in alerts[:20]:  # Max 20 alerts to avoid flooding
         try:
             props = {
                 'Alert': title_val(f'{alert["stock"]} {alert["opt_type"]} {alert["strike"]}'),
                 'Date': date_val(time.strftime('%Y-%m-%d')),
                 'Stock': rich_text_val(alert['stock']),
-                'Type': select_val(f'{alert["direction"]}'),
+                'Type': select_val(alert['direction']),
                 'Severity': select_val('🔴 High' if alert['turnover'] > 1000000 else '🟡 Medium'),
                 'Message': rich_text_val(
                     f'{alert["opt_type"]} {alert["strike"]} Exp:{alert["expiry"]} | '
-                    f'Vol:{alert["volume"]} OI:{alert["open_interest"]} | '
+                    f'Vol:{alert["volume"]} OI:{alert["open_interest"]} Δ:{alert["delta"]} | '
                     f'{alert["signals"]}'
                 ),
-                'Value': number_val(alert.get('turnover', 0)),
-                'Price': number_val(alert.get('strike', 0)),
+                'Value': number_val(alert['turnover']),
+                'Price': number_val(alert['strike']),
             }
-            add_page(db_id, props)
+            add_page(FLOW_DB_ID, props)
             count += 1
         except Exception:
             pass

@@ -235,6 +235,16 @@ def run_once(
 
         result = full_sync(today_data, yesterday_data, log_fn=log_fn)
         log_fn(f"Notion 同步完成：Daily={result['daily_count']}，Historical={result['historical_count']}，異常={result['anomaly_count']}")
+
+        # Flow scanner: scan top 20 stocks by turnover
+        try:
+            top_stocks = sorted(today_data.keys(), key=lambda k: today_data[k][0]+today_data[k][1], reverse=True)[:20]
+            from flow_scanner import batch_scan, write_flow_alerts
+            flow_alerts = batch_scan(top_stocks, log_fn=log_fn)
+            written = write_flow_alerts(flow_alerts, log_fn=log_fn)
+            log_fn(f"Flow scan: {written} alerts written to Notion")
+        except Exception as e:
+            log_fn(f"Flow scan failed: {e}")
     except Exception as e:
         log_fn(f"Notion 同步失敗：{e}")
         import traceback
@@ -271,10 +281,46 @@ def run_scheduler(
         if should_trigger:
             last_trigger_key = trigger_key
             run_once(log_fn=log_fn, publish_result_fn=publish_result_fn)
+
+
         else:
             log_fn(
                 f"等待目標時間 {TARGET_HOUR}:{TARGET_MINUTE}，目前時間：{current_hour}:{current_minute}"
             )
+
+        # Check if market is open and do quick anomaly scan
+        try:
+            from datetime import datetime as dt
+            now_hkt = dt.now()
+            # US market: 21:30-04:00 HKT (summer), 22:30-05:00 (winter)
+            is_market = (now_hkt.hour >= 21 or now_hkt.hour < 5)
+            is_minute_15 = now_hkt.minute % 15 == 0
+            
+            if is_market and is_minute_15 and not getattr(run_scheduler, '_last_monitor_minute', -1) == now_hkt.minute:
+                run_scheduler._last_monitor_minute = now_hkt.minute
+                try:
+                    from stock_api_client import get_quotes_batch
+                    from notion_client import add_page, title_val, rich_text_val, number_val, date_val, select_val, ALERTS_DB_ID
+                    # Quick scan of top 10 anomaly stocks
+                    top10 = ['US.NVDA','US.TSLA','US.AAPL','US.AMD','US.MSFT','US.AMZN','US.META','US.GOOGL','US.AVGO','US.INTC']
+                    quotes = get_quotes_batch(top10)
+                    for s, q in quotes.items():
+                        turnover = q.get('turnover', 0) or 0
+                        if turnover > 1000000000:  # > B turnover
+                            add_page(ALERTS_DB_ID, {
+                                'Alert': title_val(f'{dt.now().strftime("%H:%M")} - {s}'),
+                                'Date': date_val(dt.now().strftime('%Y-%m-%d')),
+                                'Stock': rich_text_val(s),
+                                'Type': select_val('🔥 Turnover Burst'),
+                                'Severity': select_val('🔴 High'),
+                                'Message': rich_text_val(f'{s} turnover ${turnover:,.0f} during market'),
+                                'Value': number_val(turnover),
+                                'Price': number_val(q.get('last_price', 0)),
+                            })
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # Sleep in small chunks so we can exit quickly when stop_event is set.
         for _ in range(30):
