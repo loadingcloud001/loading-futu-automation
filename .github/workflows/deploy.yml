@@ -125,7 +125,7 @@ jobs:
             echo "option-python image ready"
           ENDSSH
 
-      - name: Deploy futu-opend
+      - name: Deploy futu-opend (only if not running)
         env:
           SSH_HOST: ${{ secrets.DO002_HOST }}
         run: |
@@ -133,10 +133,15 @@ jobs:
             set -e
             cd /opt/loading-futu-automation
 
-            echo "=== Stopping old futu-opend ==="
+            if docker ps --filter name=futu-opend --filter status=running --format 'ok' | grep -q ok; then
+              echo "=== futu-opend is already running, skipping restart ==="
+              docker ps --filter name=futu-opend --format 'futu-opend: {{.Status}}'
+              exit 0
+            fi
+
+            echo "=== futu-opend not running, starting... ==="
             docker rm -f futu-opend 2>/dev/null || true
 
-            echo "=== Starting futu-opend ==="
             docker run -d -it --name futu-opend \
               --restart unless-stopped \
               --env-file .env \
@@ -151,12 +156,9 @@ jobs:
               --network loading-futu-automation_futu-net \
               manhinhang/futu-opend-docker:ubuntu-stable
 
-            echo "=== Waiting for futu-opend to initialize ==="
             sleep 5
-
-            echo "=== Verifying futu-opend ==="
             docker ps --filter name=futu-opend --filter status=running --format "futu-opend is {{.Status}}"
-            echo "futu-opend deployed successfully"
+            echo "futu-opend deployed"
           ENDSSH
 
       - name: Deploy option-python
