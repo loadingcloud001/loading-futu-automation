@@ -4,3 +4,5 @@ __pycache__/
 *.pyo
 *.log
 service_account.json
+analyze_deep_dive.py
+analyze_workbook.py

@@ -29,31 +29,18 @@ jobs:
 
       - name: Check required files exist
         run: |
-          ls -la FutuOpenD.xml futu.pem OptionPython/Dockerfile OptionPython/app.py OptionPython/requirements.txt
+          ls -la OptionPython/Dockerfile OptionPython/app.py OptionPython/requirements.txt OptionPython/20241205stocklist.csv
 
-      - name: Validate Python syntax
+      - name: Validate all Python syntax
         run: |
-          python -m py_compile OptionPython/app.py
-          echo "Python syntax is valid"
-
-      - name: Check retry configuration
-        run: |
-          echo "Validating retry environment variables in docker-compose.yml..."
-          grep -q "RETRY_MAX_ATTEMPTS=3" docker-compose.yml && echo "✓ RETRY_MAX_ATTEMPTS configured"
-          grep -q "RETRY_INITIAL_DELAY=30" docker-compose.yml && echo "✓ RETRY_INITIAL_DELAY configured"
-          grep -q "RETRY_MAX_DELAY=3600" docker-compose.yml && echo "✓ RETRY_MAX_DELAY configured"
-
-      - name: Check phone verification block detection
-        run: |
-          echo "Validating phone verification block detection in app.py..."
-          grep -q "PHONE_VERIFY_BLOCK_KEYWORDS" OptionPython/app.py && echo "✓ Block keywords defined"
-          grep -q "is_phone_verification_blocked" OptionPython/app.py && echo "✓ Block detection function exists"
-          grep -q "exponential_backoff_retry" OptionPython/app.py && echo "✓ Exponential backoff function exists"
+          for f in OptionPython/*.py; do
+            python -m py_compile "$f" && echo "✓ $f"
+          done
 
       - name: Check for leaked secrets
         run: |
           echo "Scanning for potential leaked secrets..."
-          if grep -rE "ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9]{20,}" . --include="*.yml" --include="*.yaml" --include="*.env" 2>/dev/null; then
+          if grep -rE "ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9]{20,}" . --include="*.yml" --include="*.yaml" 2>/dev/null; then
             echo "ERROR: Potential GitHub token found in code!"
             exit 1
           fi

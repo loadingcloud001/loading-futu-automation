@@ -1,7 +1,6 @@
 import pygsheets
 import pandas as pd
 import numpy as np
-from futu import *
 from datetime import datetime
 import time
 import os
@@ -9,9 +8,15 @@ import threading
 import queue
 from typing import Callable, Optional
 
+# Stock API client (replaces Futu SDK)
+from stock_api_client import (
+    get_quotes_batch,
+    get_option_chain,
+    get_macd,
+    get_rsi,
+)
+
 # === 設定參數 ===
-FUTU_HOST = os.getenv("FUTU_OPEND_IP", "futu-opend")
-FUTU_PORT = int(os.getenv("FUTU_OPEND_PORT", "11111"))
 SERVICE_FILE = os.getenv("SERVICE_FILE", "/app/service_account.json")
 SHEET_NAME = os.getenv("SHEET_NAME", "LID Risk Management")
 WORKSHEET_TITLE = os.getenv("WORKSHEET_TITLE", "Today")
@@ -19,17 +24,7 @@ EXCEL_PATH = os.getenv("EXCEL_PATH", "/app/20241205stocklist.xlsx")
 CSV_PATH = os.getenv("CSV_PATH", "/app/20241205optionresults.csv")
 TARGET_HOUR = os.getenv("TARGET_HOUR", "04").zfill(2)
 TARGET_MINUTE = os.getenv("TARGET_MINUTE", "00").zfill(2)
-FUTU_RSA_FILE_PATH = os.getenv("FUTU_RSA_FILE_PATH", "").strip()
 RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "3"))
-RETRY_INITIAL_DELAY = float(os.getenv("RETRY_INITIAL_DELAY", "30"))
-RETRY_MAX_DELAY = float(os.getenv("RETRY_MAX_DELAY", "3600"))
-
-# Phone verification block detection
-PHONE_VERIFY_BLOCK_KEYWORDS = [
-    "需要手机验证码",
-    "手机验证码失败",
-    "系统繁忙暂时无法登录",
-]
 
 
 # === 工具函式 ===
@@ -41,71 +36,7 @@ def console_log(msg: str) -> None:
     print(format_log_line(msg), flush=True)
 
 
-def init_futu_encryption(log_fn: Callable[[str], None]) -> None:
-    if not FUTU_RSA_FILE_PATH:
-        return
-    try:
-        SysConfig.set_init_rsa_file(FUTU_RSA_FILE_PATH)
-        SysConfig.enable_proto_encrypt(True)
-        log_fn(f"已啟用 Futu 協議加密 (RSA): {FUTU_RSA_FILE_PATH}")
-    except Exception as e:
-        log_fn(f"啟用 RSA 失敗：{e}")
-
-
-def is_phone_verification_blocked(error_msg: str) -> bool:
-    """Check if error message indicates phone verification block."""
-    return any(keyword in error_msg for keyword in PHONE_VERIFY_BLOCK_KEYWORDS)
-
-
-def exponential_backoff_retry(
-    log_fn: Callable[[str], None],
-    attempt: int,
-    delay: float,
-) -> float:
-    """Calculate next delay with exponential backoff, capped at max delay."""
-    next_delay = min(delay * 2, RETRY_MAX_DELAY)
-    log_fn(f"重試 #{attempt} 失敗，等待 {next_delay:.1f} 秒後重試 (已套用指數退避)")
-    return next_delay
-
-
-def create_quote_context_with_retry(
-    log_fn: Callable[[str], None],
-) -> Optional[OpenQuoteContext]:
-    """Create quote context with exponential backoff retry for phone verification blocks."""
-    delay = RETRY_INITIAL_DELAY
-
-    for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
-        log_fn(f"嘗試 #{attempt} 連接 Futu OpenD...")
-
-        try:
-            quote_ctx = OpenQuoteContext(host=FUTU_HOST, port=FUTU_PORT)
-            log_fn(f"成功連接 Futu OpenD")
-            return quote_ctx
-        except Exception as e:
-            error_msg = str(e)
-            log_fn(f"連接失敗：{error_msg}")
-
-            if is_phone_verification_blocked(error_msg):
-                log_fn(f"偵測到電話驗證封鎖 (attempt #{attempt})")
-
-                if attempt < RETRY_MAX_ATTEMPTS:
-                    delay = exponential_backoff_retry(log_fn, attempt, delay)
-                    time.sleep(delay)
-                else:
-                    log_fn("已達最大重試次數，中止連線。請聯繫富途客服解除封鎖。")
-                    return None
-            else:
-                if attempt < RETRY_MAX_ATTEMPTS:
-                    delay = exponential_backoff_retry(log_fn, attempt, delay)
-                    time.sleep(delay)
-                else:
-                    log_fn("已達最大重試次數，中止連線。")
-                    return None
-
-    return None
-
-
-def append_zero_row(stock_code):
+def append_zero_row(stock_code, stock_price=0):
     df_zero = pd.DataFrame(
         {
             "stock": [stock_code],
@@ -113,84 +44,89 @@ def append_zero_row(stock_code):
             "turnoverp": [0],
             "ivc": [0.0],
             "ivp": [0.0],
+            "stock_price": [stock_price],
         }
     )
     return df_zero.infer_objects(copy=False)
 
 
-def process_stock(quote_ctx, stock_code, log_fn: Callable[[str], None] = console_log):
+def process_stock(stock_code, stock_quotes: dict, log_fn: Callable[[str], None] = console_log):
+    """Process one stock using Stock API.
+    
+    Args:
+        stock_code: e.g. 'US.NVDA'
+        stock_quotes: batch quote result {symbol: {last_price, volume, ...}}
+        log_fn: logging function
+    
+    Returns DataFrame with turnoverc, turnoverp, ivc, ivp, stock_price, macd
+    """
     try:
-        ret1, data1 = quote_ctx.get_option_expiration_date(code=stock_code)
-        if ret1 != RET_OK:
-            log_fn(f"{stock_code} 無法取得期權到期日")
-            return append_zero_row(stock_code)
-
-        filter_call = OptionDataFilter(delta_min=0.05, delta_max=0.92, vol_min=1)
-        filter_put = OptionDataFilter(delta_min=-0.92, delta_max=-0.05, vol_min=1)
-
-        ret2, data2 = quote_ctx.get_option_chain(
-            code=stock_code, data_filter=filter_call, option_type=OptionType.CALL
-        )
-        ret3, data3 = quote_ctx.get_option_chain(
-            code=stock_code, data_filter=filter_put, option_type=OptionType.PUT
-        )
-
-        cc = data2["code"].tolist() if ret2 == RET_OK and not data2.empty else []
-        pp = data3["code"].tolist() if ret3 == RET_OK and not data3.empty else []
-
-        if not cc or not pp:
-            log_fn(f"{stock_code} 無有效期權代碼")
-            return append_zero_row(stock_code)
-
-        time.sleep(10)  # 避免 API 過載
-
-        retc, datac = quote_ctx.get_market_snapshot(cc)
-        retp, datap = quote_ctx.get_market_snapshot(pp)
-
-        if retc != RET_OK or retp != RET_OK:
-            log_fn(f"{stock_code} 市場快照取得失敗")
-            return append_zero_row(stock_code)
-
-        aaac = datac[
-            [
-                "stock_owner",
-                "code",
-                "turnover",
-                "option_implied_volatility",
-                "option_type",
-            ]
-        ]
-        aaap = datap[
-            [
-                "stock_owner",
-                "code",
-                "turnover",
-                "option_implied_volatility",
-                "option_type",
-            ]
-        ]
-
-        stock_owner = aaac["stock_owner"].iloc[0]
-        turnoverc = aaac["turnover"].iloc[1:].astype(int).sum()
-        turnoverp = aaap["turnover"].iloc[1:].astype(int).sum()
-        ivc = aaac["option_implied_volatility"].iloc[1:].astype(float).mean()
-        ivp = aaap["option_implied_volatility"].iloc[1:].astype(float).mean()
-
+        quote = stock_quotes.get(stock_code, {})
+        stock_price = float(quote.get("last_price", 0) or 0)
+        
+        # Get CALL option chain
+        calls = get_option_chain(stock_code, option_type="CALL", delta_min=0.05, delta_max=0.92)
+        puts = get_option_chain(stock_code, option_type="PUT", delta_min=-0.92, delta_max=-0.05)
+        
+        if not calls or not puts:
+            log_fn(f"{stock_code} 無有效期權數據")
+            return append_zero_row(stock_code, stock_price)
+        
+        # Calculate aggregate metrics from option chain
+        call_turnover = 0
+        put_turnover = 0
+        call_ivs = []
+        put_ivs = []
+        
+        for opt in calls:
+            volume = opt.get("volume", 0) or 0
+            price = opt.get("last_price", 0) or 0
+            iv = opt.get("implied_volatility", 0) or 0
+            if volume > 0:
+                call_turnover += int(volume * price * 100)  # 100 shares per contract
+            if iv > 0:
+                call_ivs.append(float(iv))
+        
+        for opt in puts:
+            volume = opt.get("volume", 0) or 0
+            price = opt.get("last_price", 0) or 0
+            iv = opt.get("implied_volatility", 0) or 0
+            if volume > 0:
+                put_turnover += int(volume * price * 100)
+            if iv > 0:
+                put_ivs.append(float(iv))
+        
+        ivc = sum(call_ivs) / len(call_ivs) if call_ivs else 0
+        ivp = sum(put_ivs) / len(put_ivs) if put_ivs else 0
+        
+        # Get MACD
+        macd_val = 0
+        try:
+            macd_data = get_macd(stock_code)
+            if macd_data:
+                macd_val = macd_data.get("macd", 0) or 0
+        except Exception:
+            pass
+        
+        stock_owner = stock_code
         df_row = pd.DataFrame(
             {
                 "stock": [stock_owner],
-                "turnoverc": [turnoverc],
-                "turnoverp": [turnoverp],
+                "turnoverc": [call_turnover],
+                "turnoverp": [put_turnover],
                 "ivc": [ivc],
                 "ivp": [ivp],
+                "stock_price": [stock_price],
+                "macd": [macd_val],
             }
         )
-
+        
         return df_row.infer_objects(copy=False)
-
+    
     except Exception as e:
         log_fn(f"{stock_code} 處理例外：{e}")
-        return append_zero_row(stock_code)
+        sp = stock_quotes.get(stock_code, {}).get("last_price", 0) or 0
+        return append_zero_row(stock_code, float(sp))
 
 
 def run_once(
@@ -199,25 +135,17 @@ def run_once(
     stock_limit: Optional[int] = None,
     update_sheets: bool = True,
 ) -> None:
-    log_fn("開始資料收集流程")
+    log_fn("開始資料收集流程 (Stock API)")
 
-    init_futu_encryption(log_fn)
-
-    quote_ctx = create_quote_context_with_retry(log_fn)
-    if quote_ctx is None:
-        log_fn("無法建立 Futu 連線，全域重試已耗盡。請稍後再試或聯繫富途客服。")
-        return
-
+    # Google Sheets 授權
     wks = None
     if update_sheets:
-        # Google Sheets 授權
         try:
             gc = pygsheets.authorize(service_file=SERVICE_FILE)
             sh = gc.open(SHEET_NAME)
             wks = sh.worksheet("title", WORKSHEET_TITLE)
         except Exception as e:
             log_fn(f"Google Sheets 授權失敗：{e}")
-            quote_ctx.close()
             return
 
     # 讀取股票清單
@@ -226,7 +154,6 @@ def run_once(
         stock_list = stock_data["stock"].tolist()
     except Exception as e:
         log_fn(f"讀取 CSV 錯誤：{e}")
-        quote_ctx.close()
         return
 
     if stock_limit is not None:
@@ -238,7 +165,17 @@ def run_once(
             stock_list = stock_list[:limit_int]
             log_fn(f"測試模式：只跑前 {limit_int} 支股票")
 
-    # 初始化結果表格，強制指定欄位型別
+    # Batch fetch stock quotes (1 API call for ALL stocks)
+    log_fn(f"批次取得 {len(stock_list)} 支股票報價...")
+    stock_quotes = {}
+    try:
+        stock_quotes = get_quotes_batch(stock_list)
+        log_fn(f"取得 {len(stock_quotes)} 支股票報價")
+    except Exception as e:
+        log_fn(f"批次報價失敗：{e}")
+        return
+
+    # 初始化結果表格
     df_result = pd.DataFrame(
         {
             "stock": pd.Series(dtype="str"),
@@ -246,18 +183,20 @@ def run_once(
             "turnoverp": pd.Series(dtype="int"),
             "ivc": pd.Series(dtype="float"),
             "ivp": pd.Series(dtype="float"),
+            "stock_price": pd.Series(dtype="float"),
+            "macd": pd.Series(dtype="float"),
         }
     )
 
     for idx, stock_code in enumerate(stock_list, start=1):
         log_fn(f"處理第 {idx}/{len(stock_list)} 支股票：{stock_code}")
-        df_row = process_stock(quote_ctx, stock_code, log_fn=log_fn)
+        df_row = process_stock(stock_code, stock_quotes, log_fn=log_fn)
         df_result = pd.concat([df_result, df_row], ignore_index=True)
-        time.sleep(1)
+        time.sleep(0.3)  # Rate limit: ~3 calls/sec
 
     log_fn(f"所有股票處理完成，共 {len(df_result)} 筆資料")
 
-    # 填補空值並推斷型別（避免 FutureWarning）
+    # 填補空值
     df_result = df_result.fillna(np.nan).infer_objects(copy=False)
 
     # 更新 Google Sheet
@@ -275,8 +214,57 @@ def run_once(
     except Exception as e:
         log_fn(f"儲存 CSV 錯誤：{e}")
 
-    quote_ctx.close()
-    log_fn("Futu Quote Context 已關閉")
+    # 同步到 Notion（取代手動 Google Sheet 分析）
+    try:
+        from notion_sync import full_sync
+
+        # 收集今日數據
+        today_data = {}
+        for _, row in df_result.iterrows():
+            stock_code = str(row["stock"])
+            sp = float(row.get("stock_price", 0) or 0)
+            today_data[stock_code] = (
+                row["turnoverc"],
+                row["turnoverp"],
+                row["ivc"],
+                row["ivp"],
+                sp,
+            )
+
+        # 嘗試從 Historical Archive 讀取昨日數據做對比
+        yesterday_data = {}
+        try:
+            from notion_client import (
+                HISTORICAL_ARCHIVE_DB_ID,
+                query_database,
+            )
+            from datetime import date, timedelta
+            yesterday_str = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+            pages = query_database(
+                HISTORICAL_ARCHIVE_DB_ID,
+                {"property": "Date", "date": {"equals": yesterday_str}},
+            )
+            for page in pages:
+                props = page.get("properties", {})
+                stock_val = props.get("Stock", {}).get("rich_text", [])
+                stock_code = stock_val[0]["plain_text"] if stock_val else ""
+                tc = props.get("CALL Turnover", {}).get("number", 0) or 0
+                tp = props.get("PUT Turnover", {}).get("number", 0) or 0
+                ivc = (props.get("Call IV", {}).get("number", 0) or 0) * 100  # stored as decimal
+                ivp = (props.get("Put IV", {}).get("number", 0) or 0) * 100
+                if stock_code:
+                    yesterday_data[stock_code] = (tc, tp, ivc, ivp)
+        except Exception:
+            pass  # 昨天沒有數據也沒關係，對比欄位會為 0
+
+        result = full_sync(today_data, yesterday_data, log_fn=log_fn)
+        log_fn(f"Notion 同步完成：Daily={result['daily_count']}，Historical={result['historical_count']}，異常={result['anomaly_count']}")
+    except Exception as e:
+        log_fn(f"Notion 同步失敗：{e}")
+        import traceback
+        log_fn(traceback.format_exc())
+
+    log_fn("資料收集流程完成")
 
     if publish_result_fn is not None:
         publish_result_fn(df_result)

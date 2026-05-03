@@ -38,23 +38,16 @@ services:
     container_name: option-python
     restart: unless-stopped
     environment:
-      - FUTU_OPEND_IP=futu-opend
-      - FUTU_OPEND_PORT=11111
-      - FUTU_RSA_FILE_PATH=
       - SERVICE_FILE=/app/service_account.json
       - SHEET_NAME=LID Risk Management
       - WORKSHEET_TITLE=Today
       - TARGET_HOUR=04
       - TARGET_MINUTE=00
-      - RETRY_MAX_ATTEMPTS=3
-      - RETRY_INITIAL_DELAY=30
-      - RETRY_MAX_DELAY=3600
+      - STOCK_API_KEY=test-api-key-12345
+      - NOTION_API_KEY=ntn_l8419114287aA45IOyliwxOSk6QtQ3HbMx9Pxa42hSzcwz
     volumes:
-      - ./futu.pem:/.futu/futu.pem:ro
       - ./OptionPython/service_account.json:/app/service_account.json:ro
       - ./OptionPython/20241205stocklist.csv:/app/20241205stocklist.csv:ro
-    depends_on:
-      - futu-opend
     networks:
       - futu-net
     deploy:

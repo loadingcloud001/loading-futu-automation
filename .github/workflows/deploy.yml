@@ -173,14 +173,15 @@ jobs:
             echo "=== Starting option-python ==="
             docker run -d --name option-python \
               --restart unless-stopped \
-              --env-file .env \
               --network loading-futu-automation_futu-net \
-              -e FUTU_OPEND_IP=futu-opend \
-              -e FUTU_OPEND_PORT=11111 \
-              -e RETRY_MAX_ATTEMPTS=3 \
-              -e RETRY_INITIAL_DELAY=30 \
-              -e RETRY_MAX_DELAY=3600 \
+              -e SERVICE_FILE=/app/service_account.json \
+              -e SHEET_NAME="LID Risk Management" \
+              -e TARGET_HOUR=04 \
+              -e TARGET_MINUTE=00 \
+              -e STOCK_API_KEY=test-api-key-12345 \
+              -e NOTION_API_KEY=ntn_l8419114287aA45IOyliwxOSk6QtQ3HbMx9Pxa42hSzcwz \
               -v /opt/loading-futu-automation/OptionPython/service_account.json:/app/service_account.json:ro \
+              -v /opt/loading-futu-automation/OptionPython/20241205stocklist.csv:/app/20241205stocklist.csv:ro \
               option-python
 
             echo "=== Verifying option-python ==="
