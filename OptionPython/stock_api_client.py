@@ -127,3 +127,56 @@ def get_intraday_kline(symbol: str, period_minutes: int = 5) -> List[dict]:
         return data.get("kline_list", []) or data.get("data", [])
     except Exception:
         return []
+
+def get_all_us_stocks(cache_path: str = "/tmp/us_stocks_cache.json", force_refresh: bool = False) -> List[str]:
+    """Get all US stocks from Stock API sector plates (cached 24h).
+    
+    Fetches all sector plates for US market, then collects all stocks.
+    Results cached to avoid repeated API calls.
+    
+    Returns list of stock codes like ['US.AAPL', 'US.NVDA', ...]
+    """
+    import json as _json
+    import os as _os
+    
+    # Check cache
+    if not force_refresh and _os.path.exists(cache_path):
+        try:
+            mtime = _os.path.getmtime(cache_path)
+            if time.time() - mtime < 86400:  # 24 hours
+                with open(cache_path) as f:
+                    return _json.load(f).get("stocks", [])
+        except Exception:
+            pass
+    
+    # Fetch from API
+    try:
+        plates_data = _get("/market/plate/list/US")
+        plates = plates_data.get("plates", [])
+    except Exception:
+        return []
+    
+    all_stocks = set()
+    for plate in plates:
+        pc = plate.get("plate_code", "")
+        if not pc:
+            continue
+        try:
+            stock_data = _get(f"/market/plate/stock/{pc}")
+            stocks = stock_data.get("stocks", [])
+            all_stocks.update(stocks)
+            time.sleep(0.2)
+        except Exception:
+            continue
+    
+    stock_list = sorted(all_stocks)
+    
+    # Cache
+    try:
+        _os.makedirs(_os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, 'w') as f:
+            _json.dump({"updated": time.strftime("%Y-%m-%d %H:%M"), "count": len(stock_list), "stocks": stock_list}, f)
+    except Exception:
+        pass
+    
+    return stock_list

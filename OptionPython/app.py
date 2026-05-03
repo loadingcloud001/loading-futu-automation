@@ -12,6 +12,7 @@ from stock_api_client import (
     get_quotes_batch,
     get_option_chain,
     get_macd,
+    get_all_us_stocks,
 )
 
 # === 設定參數 ===
@@ -132,13 +133,18 @@ def run_once(
 
 
 
-    # 讀取股票清單
-    try:
-        stock_data = pd.read_csv("/app/20241205stocklist.csv")
-        stock_list = stock_data["stock"].tolist()
-    except Exception as e:
-        log_fn(f"讀取 CSV 錯誤：{e}")
-        return
+    # 讀取股票清單（動態從 Stock API 獲取）
+    cache_path = os.path.join(os.path.dirname(__file__), "us_stocks_cache.json")
+    stock_list = get_all_us_stocks(cache_path=cache_path)
+    if not stock_list:
+        log_fn("無法獲取美股列表，使用 fallback CSV")
+        try:
+            stock_data = pd.read_csv("/app/20241205stocklist.csv")
+            stock_list = stock_data["stock"].tolist()
+        except Exception:
+            log_fn("Fallback CSV 也失敗，中止")
+            return
+    log_fn(f"使用 {len(stock_list)} 隻美股 (來源: Stock API)")
 
     if stock_limit is not None:
         try:

@@ -43,7 +43,6 @@ services:
       - STOCK_API_KEY=test-api-key-12345
       - NOTION_API_KEY=ntn_l8419114287aA45IOyliwxOSk6QtQ3HbMx9Pxa42hSzcwz
     volumes:
-      - ./OptionPython/20241205stocklist.csv:/app/20241205stocklist.csv:ro
     networks:
       - futu-net
     deploy:
