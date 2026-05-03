@@ -26,7 +26,7 @@ try:
         title_val,
     )
 except ImportError:
-    TRADE_JOURNAL_DB_ID = "3541f5d17d2f8118bc8ff4bf9996cd51"
+    TRADE_JOURNAL_DB_ID = "3551f5d1-7d2f-8138-b9a8-d6cf01ca0a43"
 
 
 def fetch_trades_from_notion() -> list:

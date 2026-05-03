@@ -289,7 +289,7 @@ def append_historical(metrics: list, log_fn=None) -> int:
         items.append(props)
 
     log(f"Writing {len(items)} entries to Historical Archive...")
-    count = add_pages_batch(HISTORICAL_ARCHIVE_DB_ID, items, delay=0.35)
+    count = add_pages_batch("3551f5d1-7d2f-817a-bf45-de95e46791a1", items, delay=0.35)
     log(f"Historical Archive: {count}/{len(items)} written")
     return count
 
@@ -305,7 +305,7 @@ def get_yesterday_data() -> dict:
     try:
         # For now, return empty (will be populated after first historical write)
         pages = query_database(
-            HISTORICAL_ARCHIVE_DB_ID,
+            "3551f5d1-7d2f-817a-bf45-de95e46791a1",
             {"property": "Date", "date": {"equals": yesterday_str}},
         )
         # ... parse pages to extract data
