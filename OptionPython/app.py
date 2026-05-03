@@ -165,9 +165,11 @@ def run_once(
         log_fn(f"批次報價失敗：{e}")
         return
     
-    # Filter to active stocks (those with price data - Futu supports them)
-    active_stocks = [s for s, q in stock_quotes.items() if q.get('last_price', 0) > 0]
-    log_fn(f"Active stocks with data: {len(active_stocks)}/{len(stock_list)}")
+    # Filter to active stocks, sort by turnover (most active first)
+    active_with_turnover = [(s, q.get('turnover', 0) or 0) for s, q in stock_quotes.items() if q.get('last_price', 0) > 0]
+    active_with_turnover.sort(key=lambda x: x[1], reverse=True)
+    active_stocks = [s for s, _ in active_with_turnover]
+    log_fn(f"Active stocks with data: {len(active_stocks)}/{len(stock_list)} (sorted by turnover)")
 
     # 初始化結果表格
     df_result = pd.DataFrame(

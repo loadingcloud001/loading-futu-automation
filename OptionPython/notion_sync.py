@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from notion_client import (
+    NOTION_KEY,
         DAILY_SNAPSHOT_DB_ID,
         HISTORICAL_ARCHIVE_DB_ID,
         clear_database,
@@ -32,6 +33,7 @@ try:
 except ImportError:
     # Standalone usage: import directly
     from notion_client import (
+    NOTION_KEY,
         DAILY_SNAPSHOT_DB_ID,
         HISTORICAL_ARCHIVE_DB_ID,
         clear_database,
@@ -191,15 +193,32 @@ def compute_metrics(today_data: dict, yesterday_data: dict,
 
 
 def sync_daily_snapshot(metrics: list, log_fn=None) -> int:
+    m_list = metrics
     """Clear + repopulate Daily Snapshot with today's data.
     
     Returns number of entries written.
     """
     log = log_fn or print
 
-    log("Clearing old Daily Snapshot entries...")
-    clear_database(DAILY_SNAPSHOT_DB_ID)
-    time.sleep(1)
+    # Only remove today's entries (not all historical ones)
+    today_str = m_list[0]['date'] if m_list else date.today().strftime('%Y-%m-%d')
+    log(f"Removing today's ({today_str}) entries...")
+    try:
+        today_pages = query_database(
+            DAILY_SNAPSHOT_DB_ID,
+            {"property": "Date", "date": {"equals": today_str}},
+        )
+        for page in today_pages:
+            import requests as _r
+            _r.patch(
+                f"https://api.notion.com/v1/pages/{page['id']}",
+                headers={"Authorization": f"Bearer {NOTION_KEY}", "Notion-Version": "2022-06-28"},
+                json={"in_trash": True},
+            )
+        log(f"Removed {len(today_pages)} old entries for {today_str}")
+        time.sleep(1)
+    except Exception as e:
+        log(f"Failed to remove old entries: {e}")
 
     items = []
     for m in metrics:
@@ -289,7 +308,7 @@ def append_historical(metrics: list, log_fn=None) -> int:
         items.append(props)
 
     log(f"Writing {len(items)} entries to Historical Archive...")
-    count = add_pages_batch("3551f5d1-7d2f-817a-bf45-de95e46791a1", items, delay=0.35)
+    count = add_pages_batch(HISTORICAL_ARCHIVE_DB_ID, items, delay=0.35)
     log(f"Historical Archive: {count}/{len(items)} written")
     return count
 
