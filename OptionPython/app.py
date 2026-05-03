@@ -1,4 +1,3 @@
-import pygsheets
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -16,9 +15,6 @@ from stock_api_client import (
 )
 
 # === 設定參數 ===
-SERVICE_FILE = os.getenv("SERVICE_FILE", "/app/service_account.json")
-SHEET_NAME = os.getenv("SHEET_NAME", "LID Risk Management")
-WORKSHEET_TITLE = os.getenv("WORKSHEET_TITLE", "Today")
 CSV_PATH = os.getenv("CSV_PATH", "/app/20241205optionresults.csv")
 TARGET_HOUR = os.getenv("TARGET_HOUR", "04").zfill(2)
 TARGET_MINUTE = os.getenv("TARGET_MINUTE", "00").zfill(2)
@@ -131,20 +127,10 @@ def run_once(
     log_fn: Callable[[str], None],
     publish_result_fn: Optional[Callable[[pd.DataFrame], None]] = None,
     stock_limit: Optional[int] = None,
-    update_sheets: bool = True,
 ) -> None:
     log_fn("開始資料收集流程 (Stock API)")
 
-    # Google Sheets 授權
-    wks = None
-    if update_sheets:
-        try:
-            gc = pygsheets.authorize(service_file=SERVICE_FILE)
-            sh = gc.open(SHEET_NAME)
-            wks = sh.worksheet("title", WORKSHEET_TITLE)
-        except Exception as e:
-            log_fn(f"Google Sheets 授權失敗：{e}")
-            return
+
 
     # 讀取股票清單
     try:
@@ -196,14 +182,6 @@ def run_once(
 
     # 填補空值
     df_result = df_result.fillna(np.nan).infer_objects(copy=False)
-
-    # 更新 Google Sheet
-    if update_sheets and wks is not None:
-        try:
-            wks.set_dataframe(df_result, (1, 1))
-            log_fn("Google Sheet 更新成功")
-        except Exception as e:
-            log_fn(f"更新 Google Sheet 錯誤：{e}")
 
     # 儲存 CSV
     try:

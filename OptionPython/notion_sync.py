@@ -330,8 +330,29 @@ def full_sync(today_data: dict, yesterday_data: Optional[dict] = None, log_fn=No
     if yesterday_data is None:
         yesterday_data = get_yesterday_data()
 
+    # Fetch trend data from Historical Archive
+    trend_data = {}
+    try:
+        from trend_analyzer import fetch_historical_data, compute_rolling_metrics
+        history = fetch_historical_data(days_back=20)
+        trend_data = compute_rolling_metrics(today_data, history)
+        log(f"Trend analysis: {len(trend_data)} stocks processed")
+    except Exception as e:
+        log(f"Trend analysis skipped: {e}")
+
+    # Fetch earnings data (cached, only if stock prices available)
+    earnings_data = {}
+    try:
+        stocks_with_price = [k for k, v in today_data.items() if len(v) >= 5 and v[4] > 0]
+        if stocks_with_price:
+            from earnings_calendar import batch_fetch_earnings, enrich_daily_snapshot
+            earnings_data = batch_fetch_earnings(stocks_with_price[:50], delay=0.3)  # Top 50 to avoid rate limits
+            log(f"Earnings data: {len(earnings_data)} stocks with upcoming earnings")
+    except Exception as e:
+        log(f"Earnings fetch skipped: {e}")
+
     log(f"Computing metrics for {len(today_data)} stocks...")
-    metrics = compute_metrics(today_data, yesterday_data)
+    metrics = compute_metrics(today_data, yesterday_data, trend_data, earnings_data)
 
     # Count anomalies
     anomaly_count = sum(1 for m in metrics if m["anomaly"] == "🔴 異常")
