@@ -111,6 +111,69 @@ def query_database(database_id: str, filter_obj: Optional[dict] = None) -> list:
     return results
 
 
+def page_exists(database_id: str, title_text: str) -> bool:
+    """Check if a page with given title already exists in database."""
+    try:
+        result = _request(
+            "POST",
+            f"/databases/{database_id}/query",
+            {
+                "page_size": 1,
+                "filter": {
+                    "property": "title",
+                    "title": {"equals": title_text},
+                },
+            },
+        )
+        return len(result.get("results", [])) > 0
+    except Exception:
+        # If title property not found, try common alternatives
+        for prop_name in ["Trade", "Entry", "Alert"]:
+            try:
+                result = _request(
+                    "POST",
+                    f"/databases/{database_id}/query",
+                    {
+                        "page_size": 1,
+                        "filter": {
+                            "property": prop_name,
+                            "rich_text": {"equals": title_text},
+                        },
+                    },
+                )
+                if len(result.get("results", [])) > 0:
+                    return True
+            except Exception:
+                continue
+        
+        # Also check Title property
+        try:
+            result = _request(
+                "POST",
+                f"/databases/{database_id}/query",
+                {
+                    "page_size": 1,
+                    "filter": {
+                        "property": "Trade",
+                        "title": {"equals": title_text},
+                    },
+                },
+            )
+            return len(result.get("results", [])) > 0
+        except Exception:
+            return False
+
+
+def add_page_unique(database_id: str, properties: dict, title_text: str) -> Optional[str]:
+    """Add a page only if a page with same title doesn't already exist.
+    
+    Returns page_id if created, None if skipped (duplicate).
+    """
+    if page_exists(database_id, title_text):
+        return None
+    return add_page(database_id, properties)
+
+
 # ── Property builders ────────────────────────────────────
 
 def title_prop() -> dict:
