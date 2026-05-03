@@ -188,3 +188,61 @@ def get_all_us_stocks(cache_path: str = "/tmp/us_stocks_cache.json", force_refre
         pass
     
     return stock_list
+
+
+def get_peak_trade_times(symbol: str, top_n: int = 3) -> dict:
+    """Get peak trading time slots from capital flow data.
+    
+    Returns dict with:
+        peak_time: best time to trade (highest flow)
+        second_time: 2nd best time
+        low_time: lowest flow time (to avoid)
+    
+    Falls back to empty strings if no data available.
+    """
+    try:
+        data = get_capital_flow(symbol)
+        records = data.get('data', [])
+        if not records:
+            return {'peak_time': '', 'second_time': '', 'low_time': ''}
+        
+        # Aggregate flow by minute
+        from collections import defaultdict
+        time_flow = defaultdict(float)
+        for item in records:
+            time_str = item.get('capital_flow_item_time', '')
+            inflow = item.get('in_flow', 0) or 0
+            if time_str and inflow > 0:
+                # Extract HH:MM
+                parts = time_str.split(' ')
+                if len(parts) >= 2:
+                    t = parts[1][:5]
+                else:
+                    t = time_str[:5]
+                time_flow[t] += inflow
+        
+        if not time_flow:
+            return {'peak_time': '', 'second_time': '', 'low_time': ''}
+        
+        sorted_times = sorted(time_flow.items(), key=lambda x: x[1], reverse=True)
+        
+        return {
+            'peak_time': sorted_times[0][0] if len(sorted_times) > 0 else '',
+            'second_time': sorted_times[1][0] if len(sorted_times) > 1 else '',
+            'low_time': sorted_times[-1][0] if len(sorted_times) > 2 else '',
+        }
+    except Exception:
+        return {'peak_time': '', 'second_time': '', 'low_time': ''}
+
+
+def batch_get_peak_times(symbols: list, delay: float = 0.3) -> dict:
+    """Get peak trade times for multiple symbols.
+    
+    Returns {symbol: {peak_time, second_time, low_time}}
+    """
+    import time as _time
+    results = {}
+    for sym in symbols:
+        results[sym] = get_peak_trade_times(sym)
+        _time.sleep(delay)
+    return results

@@ -351,8 +351,25 @@ def full_sync(today_data: dict, yesterday_data: Optional[dict] = None, log_fn=No
     except Exception as e:
         log(f"Earnings fetch skipped: {e}")
 
+    # Compute peak trading times from capital flow data (top 30 stocks)
+    peak_times = {}
+    try:
+        top_stocks = sorted(today_data.keys(), key=lambda k: today_data[k][0]+today_data[k][1], reverse=True)[:30]
+        from stock_api_client import batch_get_peak_times
+        peak_times = batch_get_peak_times(top_stocks, delay=0.3)
+        log(f"Peak trade times: {len(peak_times)} stocks computed")
+    except Exception as e:
+        log(f"Peak times skipped: {e}")
+
     log(f"Computing metrics for {len(today_data)} stocks...")
     metrics = compute_metrics(today_data, yesterday_data, trend_data, earnings_data)
+    
+    # Enrich metrics with computed peak times
+    for m in metrics:
+        stock = m['stock']
+        if stock in peak_times and peak_times[stock].get('peak_time'):
+            m['peak_time'] = peak_times[stock]['peak_time']
+            m['second_time'] = peak_times[stock].get('second_time', '')
 
     # Count anomalies
     anomaly_count = sum(1 for m in metrics if m["anomaly"] == "🔴 異常")
