@@ -149,25 +149,33 @@ def get_all_us_stocks(cache_path: str = "/tmp/us_stocks_cache.json", force_refre
         except Exception:
             pass
     
-    # Fetch from API
+    # Fetch plates list
+    plates = []
     try:
-        plates_data = _get("/market/plate/list/US")
+        plates_data = _get("/market/plate/list/US", timeout=15)
         plates = plates_data.get("plates", [])
     except Exception:
+        pass
+    
+    if not plates:
         return []
     
     all_stocks = set()
-    for plate in plates:
+    for i, plate in enumerate(plates):
         pc = plate.get("plate_code", "")
         if not pc:
             continue
         try:
-            stock_data = _get(f"/market/plate/stock/{pc}")
+            stock_data = _get(f"/market/plate/stock/{pc}", timeout=10)
             stocks = stock_data.get("stocks", [])
             all_stocks.update(stocks)
-            time.sleep(0.2)
         except Exception:
             continue
+        # Small delay between calls
+        if i % 20 == 0:
+            time.sleep(0.5)
+        else:
+            time.sleep(0.15)
     
     stock_list = sorted(all_stocks)
     
