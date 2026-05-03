@@ -6,3 +6,4 @@ __pycache__/
 service_account.json
 analyze_deep_dive.py
 analyze_workbook.py
+OptionPython/us_stocks_cache.json
