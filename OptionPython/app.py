@@ -16,7 +16,7 @@ from stock_api_client import (
 )
 
 # === 設定參數 ===
-CSV_PATH = os.getenv("CSV_PATH", "/app/20241205optionresults.csv")
+CSV_PATH = os.getenv("CSV_PATH", "/tmp/optionresults.csv")
 TARGET_HOUR = os.getenv("TARGET_HOUR", "04").zfill(2)
 TARGET_MINUTE = os.getenv("TARGET_MINUTE", "00").zfill(2)
 
@@ -137,13 +137,9 @@ def run_once(
     cache_path = os.path.join(os.path.dirname(__file__), "us_stocks_cache.json")
     stock_list = get_all_us_stocks(cache_path=cache_path)
     if not stock_list:
-        log_fn("無法獲取美股列表，使用 fallback CSV")
-        try:
-            stock_data = pd.read_csv("/app/20241205stocklist.csv")
-            stock_list = stock_data["stock"].tolist()
-        except Exception:
-            log_fn("Fallback CSV 也失敗，中止")
-            return
+        log_fn("無法獲取美股列表，使用內建 fallback 清單")
+        log_fn("請確認 Stock API 可連線")
+        return
     log_fn(f"使用 {len(stock_list)} 隻美股 (來源: Stock API)")
 
     if stock_limit is not None:
