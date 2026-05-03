@@ -19,6 +19,7 @@ from stock_api_client import (
 CSV_PATH = os.getenv("CSV_PATH", "/tmp/optionresults.csv")
 TARGET_HOUR = os.getenv("TARGET_HOUR", "04").zfill(2)
 TARGET_MINUTE = os.getenv("TARGET_MINUTE", "00").zfill(2)
+SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "0"))  # 0 = daily only, >0 = every N minutes
 
 
 # === 工具函式 ===

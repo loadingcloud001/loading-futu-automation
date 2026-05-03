@@ -40,6 +40,7 @@ services:
     environment:
       - TARGET_HOUR=04
       - TARGET_MINUTE=00
+      - SYNC_INTERVAL_MINUTES=5
       - STOCK_API_KEY=test-api-key-12345
       - NOTION_API_KEY=ntn_l8419114287aA45IOyliwxOSk6QtQ3HbMx9Pxa42hSzcwz
     volumes:
