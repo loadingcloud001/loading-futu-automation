@@ -351,6 +351,7 @@ def sunday_scan(log_fn):
         option_stocks = []
         for i, stock in enumerate(top500):
             has_options = False
+            active_calls = active_puts = 0
             for attempt in range(2):
                 try:
                     r = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=CALL', headers=H, timeout=10)
@@ -375,9 +376,8 @@ def sunday_scan(log_fn):
                 except: time.sleep(1)
             if has_options:
                 option_stocks.append(stock)
-            if (i+1) % 100 == 0:
-                log_fn(f"  {i+1}/500: {len(option_stocks)} have options ({active_calls}C + {active_puts}P)")
-            time.sleep(0.15)
+            if (i+1) % 50 == 0:
+                log_fn(f"  {i+1}/500: {len(option_stocks)} have options (last: {stock} C{active_calls}+P{active_puts})")
             time.sleep(0.15)
 
         log_fn(f"Stocks with options: {len(option_stocks)}")
