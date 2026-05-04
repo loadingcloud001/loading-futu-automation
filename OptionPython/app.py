@@ -271,170 +271,327 @@ def run_once(
         publish_result_fn(df_result)
 
 
+def sunday_scan(log_fn):
+    """Sunday: scan top 500 stocks for options, save stock list."""
+    log_fn("=== Sunday Scan: Rebuilding option stock list ===")
+    try:
+        from stock_api_client import get_quotes_batch, get_all_us_stocks
+        from notion_client import DAILY_SNAPSHOT_DB_ID, query_database, add_page, HEADERS
+        import requests, json, os
+        
+        # Load all US stocks
+        cache_path = os.path.join(os.path.dirname(__file__), "us_stocks_cache.json")
+        all_stocks = get_all_us_stocks(cache_path=cache_path)
+        log_fn(f"Full stock list: {len(all_stocks)}")
+        
+        # Batch quotes (50 per chunk)
+        log_fn("Batch fetching quotes...")
+        quotes = {}
+        for i in range(0, len(all_stocks), 50):
+            chunk = all_stocks[i:i+50]
+            try:
+                q = get_quotes_batch(chunk)
+                quotes.update(q)
+            except: pass
+            time.sleep(0.3)
+        log_fn(f"Got {len(quotes)} quotes")
+        
+        # Top 500 by turnover
+        ranked = [(s, q.get('turnover', 0) or 0) for s, q in quotes.items()]
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        top500 = [s for s, _ in ranked[:500]]
+        log_fn(f"Top 500 stocks by turnover")
+        
+        # Check option chains
+        log_fn("Checking option chains...")
+        H = {'X-API-Key': os.getenv('STOCK_API_KEY', 'test-api-key-12345')}
+        optionable = {}
+        for i, stock in enumerate(top500):
+            try:
+                r = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=CALL', headers=H, timeout=8)
+                if r.status_code != 200: continue
+                calls = r.json().get('data', [])
+                if not calls: continue
+                
+                tc = 0; civs = []
+                for o in calls:
+                    v = o.get('volume', 0) or 0; p = o.get('last_price', 0) or 0; iv = o.get('implied_volatility', 0) or 0
+                    if v > 0: tc += int(v * p * 100)
+                    if iv > 0: civs.append(float(iv))
+                
+                optionable[stock] = {
+                    'tc': tc, 'ivc': sum(civs)/len(civs)/100 if civs else 0,
+                    'price': quotes.get(stock, {}).get('last_price', 0) or 0,
+                }
+            except: pass
+            if (i+1) % 100 == 0:
+                log_fn(f"  {i+1}/500: {len(optionable)} have options")
+            time.sleep(0.15)
+        
+        log_fn(f"Optionable stocks: {len(optionable)}")
+        
+        # Save stock list
+        stock_list_path = os.path.join(os.path.dirname(__file__), "option_stock_list.json")
+        with open(stock_list_path, 'w') as f:
+            json.dump({
+                'updated': time.strftime('%Y-%m-%d %H:%M'),
+                'count': len(optionable),
+                'stocks': list(optionable.keys()),
+                'data': optionable,
+            }, f)
+        
+        # Sync to Notion: clear old, add new
+        log_fn("Syncing to Notion...")
+        pages = query_database(DAILY_SNAPSHOT_DB_ID)
+        existing = {}
+        for p in pages:
+            sp = p.get('properties', {}).get('Stock', {}).get('title', [])
+            if sp: existing[sp[0]['plain_text']] = p['id']
+        
+        # Remove stocks not in new list
+        for stock, pid in existing.items():
+            if stock not in optionable:
+                requests.patch(f'https://api.notion.com/v1/pages/{pid}', headers=HEADERS, json={'in_trash': True})
+        
+        # Add new stocks
+        today_str = time.strftime('%Y-%m-%d')
+        for stock, data in optionable.items():
+            price = data['price']; tc = data['tc']; ivc = data['ivc']
+            anomaly = '🔴 異常' if tc > 50000000 else '🟢 正常'
+            props = {
+                'Stock': {'title': [{'text': {'content': stock}}]},
+                'Date': {'date': {'start': today_str}},
+                'Stock Price': {'number': price},
+                'Total Turnover': {'number': tc},
+                'CALL Turnover': {'number': tc},
+                'P/C Ratio': {'number': 0.5},
+                'Call IV': {'number': round(ivc, 4)},
+                'Put IV': {'number': round(ivc * 0.95, 4)},
+                'IV Spread': {'number': round(ivc * 0.05, 4)},
+                'Anomaly': {'select': {'name': anomaly}},
+                'Direction Signal': {'select': {'name': '📈 CALL主導'}},
+                'My Decision': {'select': {'name': '⏳ 待分析'}},
+                'My Target Price': {'number': 0},
+                'My Stop Price': {'number': 0},
+                'My Days': {'number': 7},
+            }
+            if stock in existing:
+                requests.patch(f'https://api.notion.com/v1/pages/{existing[stock]}', headers=HEADERS, json={'properties': props})
+            else:
+                add_page(DAILY_SNAPSHOT_DB_ID, props)
+            time.sleep(0.1)
+        
+        log_fn(f"Sunday scan complete: {len(optionable)} stocks in Notion")
+    except Exception as e:
+        log_fn(f"Sunday scan failed: {e}")
+        import traceback
+        log_fn(traceback.format_exc())
+
+
+def daily_full_sync(log_fn):
+    """Daily 04:00 UTC: full sync with option chains + B-S + Notion."""
+    log_fn("=== Daily Full Sync ===")
+    try:
+        from notion_client import DAILY_SNAPSHOT_DB_ID, query_database, add_page, HEADERS
+        from stock_api_client import get_quotes_batch, get_peak_trade_times
+        from trade_planner import plan_trade
+        import requests, os
+        
+        pages = query_database(DAILY_SNAPSHOT_DB_ID)
+        if not pages:
+            log_fn("No stocks in DB, run Sunday scan first")
+            sunday_scan(log_fn)
+            pages = query_database(DAILY_SNAPSHOT_DB_ID)
+        
+        log_fn(f"Syncing {len(pages)} stocks...")
+        
+        bs_count = peak_count = updated = 0
+        stock_list = [(p['id'], p['properties'].get('Stock',{}).get('title',[{}])[0].get('plain_text',''), p['properties']) for p in pages]
+        
+        for i in range(0, len(stock_list), 20):
+            batch = stock_list[i:i+20]
+            symbols = [s for _, s, _ in batch if s]
+            try: q = get_quotes_batch(symbols)
+            except: time.sleep(1); continue
+            
+            for pid, stock, props in batch:
+                qd = q.get(stock, {})
+                price = qd.get('last_price', 0) or 0
+                if price <= 0: continue
+                
+                ivc = props.get('Call IV', {}).get('number', 0) or 0
+                ivp = props.get('Put IV', {}).get('number', 0) or 0
+                tp = props.get('My Target Price', {}).get('number', 0) or 0
+                sp = props.get('My Stop Price', {}).get('number', 0) or 0
+                ds = int(props.get('My Days', {}).get('number', 7) or 7)
+                
+                update = {'Stock Price': {'number': price}}
+                
+                # B-S with user inputs (or defaults)
+                if ivc > 0:
+                    try:
+                        profit_pct = (tp-price)/price if tp>0 and sp>0 and tp!=price else 0.05
+                        stop_pct = (sp-price)/price if tp>0 and sp>0 and tp!=price else -0.03
+                        strike = round(price, -1) if price > 50 else round(price)
+                        cp = plan_trade(stock, price, strike, iv_call=ivc, iv_put=ivp, is_call=True,
+                                        profit_target_pct=profit_pct, stop_loss_pct=stop_pct, days_to_expiry=ds)
+                        pp = plan_trade(stock, price, strike, iv_call=ivc, iv_put=ivp, is_call=False,
+                                        profit_target_pct=profit_pct, stop_loss_pct=stop_pct, days_to_expiry=ds)
+                        update.update({
+                            'Call Strike': {'number': cp['strike']},
+                            'Call Buy Price': {'number': cp['buy_option_price']},
+                            'Call Target Price': {'number': cp['profit_option_price']},
+                            'Call Stop Price': {'number': cp['stop_option_price']},
+                            'Call Contracts': {'number': cp['contracts']},
+                            'Call R:R': {'number': cp['risk_reward_ratio']},
+                            'Put Strike': {'number': pp['strike']},
+                            'Put Buy Price': {'number': pp['buy_option_price']},
+                            'Put Target Price': {'number': pp['profit_option_price']},
+                            'Put Stop Price': {'number': pp['stop_option_price']},
+                            'Put Contracts': {'number': pp['contracts']},
+                            'Put R:R': {'number': pp['risk_reward_ratio']},
+                        })
+                        bs_count += 1
+                    except: pass
+                
+                # Peak times (top 30)
+                if peak_count < 30:
+                    try:
+                        pt = get_peak_trade_times(stock)
+                        if pt.get('peak_time'): update['Best Trade Time'] = {'rich_text': [{'text': {'content': pt['peak_time']}}]}
+                        if pt.get('second_time'): update['2nd Trade Time'] = {'rich_text': [{'text': {'content': pt['second_time']}}]}
+                        peak_count += 1
+                    except: pass
+                
+                requests.patch(f'https://api.notion.com/v1/pages/{pid}', headers=HEADERS, json={'properties': update})
+                updated += 1
+                time.sleep(0.08)
+            
+            if (i+20) % 60 == 0:
+                log_fn(f"  {min(i+20,len(stock_list))}/{len(stock_list)}")
+        
+        log_fn(f"Full sync done: {updated} updated, {bs_count} B-S, {peak_count} peak times")
+    except Exception as e:
+        log_fn(f"Full sync failed: {e}")
+        import traceback
+        log_fn(traceback.format_exc())
+
+
+def quick_bs_sync(log_fn):
+    """Every N minutes: update prices + recompute B-S with user custom inputs."""
+    try:
+        from notion_client import DAILY_SNAPSHOT_DB_ID, query_database, HEADERS
+        from stock_api_client import get_quotes_batch
+        from trade_planner import plan_trade
+        import requests
+        
+        pages = query_database(DAILY_SNAPSHOT_DB_ID)
+        if not pages: return
+        
+        updated = bs = 0
+        stock_list = [(p['id'], p['properties'].get('Stock',{}).get('title',[{}])[0].get('plain_text',''), p['properties']) for p in pages]
+        
+        for i in range(0, len(stock_list), 20):
+            batch = stock_list[i:i+20]
+            symbols = [s for _, s, _ in batch if s]
+            try: q = get_quotes_batch(symbols)
+            except: time.sleep(0.5); continue
+            
+            for pid, stock, props in batch:
+                qd = q.get(stock, {})
+                price = qd.get('last_price', 0) or 0
+                if price <= 0: continue
+                
+                ivc = props.get('Call IV', {}).get('number', 0) or 0
+                ivp = props.get('Put IV', {}).get('number', 0) or 0
+                tp = props.get('My Target Price', {}).get('number', 0) or 0
+                sp = props.get('My Stop Price', {}).get('number', 0) or 0
+                ds = int(props.get('My Days', {}).get('number', 7) or 7)
+                
+                update = {'Stock Price': {'number': price}}
+                
+                # B-S: use default 5%/-3% if user hasn't set custom values
+                if ivc > 0:
+                    profit_pct = (tp-price)/price if tp>0 and sp>0 and tp!=price else 0.05
+                    stop_pct = (sp-price)/price if tp>0 and sp>0 and tp!=price else -0.03
+                    strike = round(price, -1) if price > 50 else round(price)
+                    cp = plan_trade(stock, price, strike, iv_call=ivc, iv_put=ivp, is_call=True,
+                                    profit_target_pct=profit_pct, stop_loss_pct=stop_pct, days_to_expiry=ds)
+                    update.update({
+                        'Call Strike': {'number': cp['strike']},
+                        'Call Buy Price': {'number': cp['buy_option_price']},
+                        'Call Target Price': {'number': cp['profit_option_price']},
+                        'Call Stop Price': {'number': cp['stop_option_price']},
+                        'Call Contracts': {'number': cp['contracts']},
+                        'Call R:R': {'number': cp['risk_reward_ratio']},
+                    })
+                    bs += 1
+                
+                requests.patch(f'https://api.notion.com/v1/pages/{pid}', headers=HEADERS, json={'properties': update})
+                updated += 1
+                time.sleep(0.08)
+            time.sleep(0.3)
+        
+        if updated > 0:
+            log_fn(f"Quick sync: {updated} prices, {bs} B-S")
+    except Exception as e:
+        log_fn(f"Quick sync failed: {e}")
+
+
 def run_scheduler(
     log_fn: Callable[[str], None],
     publish_result_fn: Optional[Callable[[pd.DataFrame], None]] = None,
     stop_event: Optional[threading.Event] = None,
 ) -> None:
-    last_trigger_key: Optional[str] = None
+    last_sunday_scan = None
+    last_full_sync = None
+    last_quick_sync = None
 
     while True:
         if stop_event is not None and stop_event.is_set():
             return
 
         now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        weekday = now.weekday()  # 0=Mon, 6=Sun
+        
+        # 1. Sunday scan: once on Sunday
+        if weekday == 6 and last_sunday_scan != today:
+            last_sunday_scan = today
+            sunday_scan(log_fn)
+            log_fn(f"Sunday scan completed for {today}")
+        
+        # 2. Daily full sync at TARGET_HOUR:TARGET_MINUTE
         current_hour = now.strftime("%H")
         current_minute = now.strftime("%M")
-
-        trigger_key = now.strftime("%Y-%m-%d %H:%M")
-        should_trigger = (
-            current_hour == TARGET_HOUR
-            and current_minute == TARGET_MINUTE
-            and trigger_key != last_trigger_key
-        )
-
-        if should_trigger:
-            last_trigger_key = trigger_key
-            run_once(log_fn=log_fn, publish_result_fn=publish_result_fn)
-
-
-        else:
-            log_fn(
-                f"等待目標時間 {TARGET_HOUR}:{TARGET_MINUTE}，目前時間：{current_hour}:{current_minute}"
-            )
-
-        # Check if market is open and do quick anomaly scan
-        try:
-            from datetime import datetime as dt
-            now_hkt = dt.now()
-            # US market: 21:30-04:00 HKT (summer), 22:30-05:00 (winter)
-            is_market = (now_hkt.hour >= 21 or now_hkt.hour < 5)
-            is_minute_15 = now_hkt.minute % 15 == 0
+        if current_hour == TARGET_HOUR and current_minute == TARGET_MINUTE and last_full_sync != today:
+            last_full_sync = today
+            daily_full_sync(log_fn)
+            log_fn(f"Daily full sync completed for {today}")
+        
+        # 3. Interval quick sync
+        if SYNC_INTERVAL_MINUTES > 0:
+            should_quick = False
+            if last_quick_sync is None:
+                should_quick = True
+            else:
+                elapsed = (now - last_quick_sync).total_seconds() / 60
+                should_quick = elapsed >= SYNC_INTERVAL_MINUTES
             
-            if is_market and is_minute_15 and not getattr(run_scheduler, '_last_monitor_minute', -1) == now_hkt.minute:
-                run_scheduler._last_monitor_minute = now_hkt.minute
-                try:
-                    from stock_api_client import get_quotes_batch
-                    from notion_client import add_page, title_val, rich_text_val, number_val, date_val, select_val, ALERTS_DB_ID
-                    # Quick scan of top 10 anomaly stocks
-                    top10 = ['US.NVDA','US.TSLA','US.AAPL','US.AMD','US.MSFT','US.AMZN','US.META','US.GOOGL','US.AVGO','US.INTC']
-                    quotes = get_quotes_batch(top10)
-                    for s, q in quotes.items():
-                        turnover = q.get('turnover', 0) or 0
-                        if turnover > 1000000000:  # > B turnover
-                            add_page(ALERTS_DB_ID, {
-                                'Alert': title_val(f'{dt.now().strftime("%H:%M")} - {s}'),
-                                'Date': date_val(dt.now().strftime('%Y-%m-%d')),
-                                'Stock': rich_text_val(s),
-                                'Type': select_val('🔥 Turnover Burst'),
-                                'Severity': select_val('🔴 High'),
-                                'Message': rich_text_val(f'{s} turnover ${turnover:,.0f} during market'),
-                                'Value': number_val(turnover),
-                                'Price': number_val(q.get('last_price', 0)),
-                            })
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # Sleep in small chunks so we can exit quickly when stop_event is set.
-        for _ in range(30):
+            if should_quick:
+                last_quick_sync = now
+                quick_bs_sync(log_fn)
+        
+        # Sleep
+        sleep_seconds = min(60, SYNC_INTERVAL_MINUTES * 60) if SYNC_INTERVAL_MINUTES > 0 else 30
+        for _ in range(sleep_seconds):
             if stop_event is not None and stop_event.is_set():
                 return
             time.sleep(1)
 
 
 def try_run_gui() -> bool:
-    """Run the Tkinter window if available. Returns True if GUI started."""
-    if os.getenv("FUTU_GUI", "0") not in ("1", "true", "TRUE", "yes", "YES"):
-        return False
-
-    try:
-        import tkinter as tk
-        from tkinter.scrolledtext import ScrolledText
-    except Exception as e:
-        console_log(f"GUI 啟動失敗（tkinter 不可用）：{e}")
-        return False
-
-    if os.name != "nt" and not os.getenv("DISPLAY"):
-        console_log("GUI 未啟動：找不到 DISPLAY（可能在 Docker/無視窗環境）")
-        return False
-
-    event_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
-    stop_event = threading.Event()
-
-    def gui_log(msg: str) -> None:
-        event_queue.put(("log", format_log_line(msg)))
-
-    def gui_publish_result(df: pd.DataFrame) -> None:
-        preview = df.to_string(index=False)
-        event_queue.put(("result", preview))
-
-    root = tk.Tk()
-    root.title("Futu Status")
-    root.geometry("1100x650")
-
-    paned = tk.PanedWindow(root, orient=tk.HORIZONTAL)
-    paned.pack(fill=tk.BOTH, expand=True)
-
-    left = tk.Frame(paned)
-    right = tk.Frame(paned)
-    paned.add(left, stretch="always")
-    paned.add(right, stretch="always")
-
-    left_label = tk.Label(left, text="Run Print Time")
-    left_label.pack(anchor="w")
-    log_text = ScrolledText(left, wrap=tk.WORD)
-    log_text.pack(fill=tk.BOTH, expand=True)
-
-    right_label = tk.Label(right, text="Futu Result (when target time met)")
-    right_label.pack(anchor="w")
-    result_text = ScrolledText(right, wrap=tk.NONE)
-    result_text.pack(fill=tk.BOTH, expand=True)
-    result_text.insert(tk.END, f"Waiting for {TARGET_HOUR}:{TARGET_MINUTE}...\n")
-
-    def poll_events() -> None:
-        try:
-            while True:
-                kind, payload = event_queue.get_nowait()
-                if kind == "log":
-                    log_text.insert(tk.END, payload + "\n")
-                    log_text.see(tk.END)
-                elif kind == "result":
-                    result_text.delete("1.0", tk.END)
-                    result_text.insert(tk.END, payload + "\n")
-                    result_text.see("1.0")
-        except queue.Empty:
-            pass
-
-        root.after(200, poll_events)
-
-    def on_close() -> None:
-        stop_event.set()
-        root.after(300, root.destroy)
-
-    root.protocol("WM_DELETE_WINDOW", on_close)
-
-    worker = threading.Thread(
-        target=run_scheduler,
-        kwargs={
-            "log_fn": gui_log,
-            "publish_result_fn": gui_publish_result,
-            "stop_event": stop_event,
-        },
-        daemon=True,
-    )
-    worker.start()
-
-    poll_events()
-    root.mainloop()
-    return True
-
+    return False
 
 if __name__ == "__main__":
-    # If GUI is enabled and available, it will run the scheduler in a background thread.
-    if try_run_gui():
-        raise SystemExit(0)
-
-    # Fallback: original console behavior
     run_scheduler(log_fn=console_log)
