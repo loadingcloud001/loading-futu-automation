@@ -13,6 +13,7 @@ from stock_api_client import (
     get_option_chain,
     get_macd,
     get_all_us_stocks,
+    get_intraday_kline,
 )
 
 # === 設定參數 ===
@@ -317,121 +318,88 @@ def run_once(
 
 
 def sunday_scan(log_fn):
-    """Sunday: scan top 500 stocks for options, save stock list."""
+    """Sunday: scan top 500 stocks for options, save stock list to Stock List DB."""
     log_fn("=== Sunday Scan: Rebuilding option stock list ===")
     try:
-        from stock_api_client import get_quotes_batch, get_all_us_stocks
-        from notion_client import DAILY_SNAPSHOT_DB_ID, query_database, add_page, HEADERS
+        from notion_client import STOCK_LIST_DB_ID, query_database, add_page, HEADERS
         import requests, json, os
-        
+
         # Load all US stocks
         cache_path = os.path.join(os.path.dirname(__file__), "us_stocks_cache.json")
         all_stocks = get_all_us_stocks(cache_path=cache_path)
         log_fn(f"Full stock list: {len(all_stocks)}")
-        
+
         # Batch quotes (50 per chunk)
         log_fn("Batch fetching quotes...")
         quotes = {}
         for i in range(0, len(all_stocks), 50):
-            chunk = all_stocks[i:i+50]
             try:
-                q = get_quotes_batch(chunk)
+                q = get_quotes_batch(all_stocks[i:i+50])
                 quotes.update(q)
             except: pass
             time.sleep(0.3)
         log_fn(f"Got {len(quotes)} quotes")
-        
+
         # Top 500 by turnover
         ranked = [(s, q.get('turnover', 0) or 0) for s, q in quotes.items()]
         ranked.sort(key=lambda x: x[1], reverse=True)
         top500 = [s for s, _ in ranked[:500]]
-        log_fn(f"Top 500 stocks by turnover")
-        
-        # Check option chains
+        log_fn(f"Top 500 by turnover")
+
+        # Check option chains (if chain returns data = has options)
         log_fn("Checking option chains...")
         H = {'X-API-Key': os.getenv('STOCK_API_KEY', 'test-api-key-12345')}
-        optionable = {}
+        option_stocks = []
         for i, stock in enumerate(top500):
-            try:
-                r = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=CALL', headers=H, timeout=8)
-                if r.status_code != 200: continue
-                calls = r.json().get('data', [])
-                if not calls: continue
-                
-                tc = 0; civs = []
-                price = quotes.get(stock, {}).get('last_price', 0) or 0
-                # Compute smart IV from near-ATM options
-                ivc, ivp = compute_iv_smart(calls, puts, price)
-                
-                near_atm = filter_near_atm_options(calls, price)
-                tc = 0
-                for o in near_atm:
-                    v = o.get('volume', 0) or 0; p = o.get('last_price', 0) or 0
-                    if v > 0: tc += int(v * p * 100)
-                
-                optionable[stock] = {
-                    'tc': tc, 'ivc': ivc, 'ivp': ivp,
-                    'price': price,
-                }
-            except: pass
+            has_options = False
+            for attempt in range(2):
+                try:
+                    r = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=CALL', headers=H, timeout=10)
+                    if r.status_code == 200 and r.json().get('data'):
+                        has_options = True
+                        break
+                    time.sleep(1)
+                except: time.sleep(1)
+            if has_options:
+                option_stocks.append(stock)
             if (i+1) % 100 == 0:
-                log_fn(f"  {i+1}/500: {len(optionable)} have options")
+                log_fn(f"  {i+1}/500: {len(option_stocks)} have options")
             time.sleep(0.15)
-        
-        log_fn(f"Optionable stocks: {len(optionable)}")
-        
-        # Save stock list
-        stock_list_path = os.path.join(os.path.dirname(__file__), "option_stock_list.json")
-        with open(stock_list_path, 'w') as f:
-            json.dump({
-                'updated': time.strftime('%Y-%m-%d %H:%M'),
-                'count': len(optionable),
-                'stocks': list(optionable.keys()),
-                'data': optionable,
-            }, f)
-        
-        # Sync to Notion: clear old, add new
-        log_fn("Syncing to Notion...")
-        pages = query_database(DAILY_SNAPSHOT_DB_ID)
-        existing = {}
+
+        log_fn(f"Stocks with options: {len(option_stocks)}")
+
+        # Sync to Stock List DB: remove old, add new
+        pages = query_database(STOCK_LIST_DB_ID)
+        existing = set()
         for p in pages:
             sp = p.get('properties', {}).get('Stock', {}).get('title', [])
-            if sp: existing[sp[0]['plain_text']] = p['id']
-        
-        # Remove stocks not in new list
-        for stock, pid in existing.items():
-            if stock not in optionable:
-                requests.patch(f'https://api.notion.com/v1/pages/{pid}', headers=HEADERS, json={'in_trash': True})
-        
-        # Add new stocks
+            if sp: existing.add(sp[0]['plain_text'])
+
+        # Trash old entries not in new list
+        for p in pages:
+            sp = p.get('properties', {}).get('Stock', {}).get('title', [])
+            stock = sp[0]['plain_text'] if sp else ''
+            if stock and stock not in set(option_stocks):
+                requests.patch(f'https://api.notion.com/v1/pages/{p["id"]}', headers=HEADERS, json={'in_trash': True})
+
+        # Add new entries
         today_str = time.strftime('%Y-%m-%d')
-        for stock, data in optionable.items():
-            price = data['price']; tc = data['tc']; ivc = data['ivc']
-            anomaly = '🔴 異常' if tc > 50000000 else '🟢 正常'
-            props = {
-                'Stock': {'title': [{'text': {'content': stock}}]},
-                'Date': {'date': {'start': today_str}},
-                'Stock Price': {'number': price},
-                'Total Turnover': {'number': tc},
-                'CALL Turnover': {'number': tc},
-                'P/C Ratio': {'number': 0.5},
-                'Call IV': {'number': round(ivc, 4)},
-                'Put IV': {'number': round(ivc * 0.95, 4)},
-                'IV Spread': {'number': round(ivc * 0.05, 4)},
-                'Anomaly': {'select': {'name': anomaly}},
-                'Direction Signal': {'select': {'name': '📈 CALL主導'}},
-                'My Decision': {'select': {'name': '⏳ 待分析'}},
-                'My Target Price': {'number': 0},
-                'My Stop Price': {'number': 0},
-                'My Days': {'number': 7},
-            }
-            if stock in existing:
-                requests.patch(f'https://api.notion.com/v1/pages/{existing[stock]}', headers=HEADERS, json={'properties': props})
-            else:
-                add_page(DAILY_SNAPSHOT_DB_ID, props)
-            time.sleep(0.1)
-        
-        log_fn(f"Sunday scan complete: {len(optionable)} stocks in Notion")
+        added = 0
+        for stock in option_stocks:
+            if stock not in existing:
+                add_page(STOCK_LIST_DB_ID, {
+                    'Stock': title_val(stock),
+                    'Active': checkbox_val(True),
+                    'Last Checked': date_val(today_str),
+                })
+                added += 1
+                time.sleep(0.15)
+
+        # Save cache file
+        with open(os.path.join(os.path.dirname(__file__), "option_stock_list.json"), 'w') as f:
+            json.dump({'updated': today_str, 'count': len(option_stocks), 'stocks': option_stocks}, f)
+
+        log_fn(f"Sunday scan complete: {len(option_stocks)} stocks, {added} new")
     except Exception as e:
         log_fn(f"Sunday scan failed: {e}")
         import traceback
@@ -439,175 +407,176 @@ def sunday_scan(log_fn):
 
 
 def daily_full_sync(log_fn):
-    """Daily 04:00 UTC: full sync with option chains + B-S + Notion."""
+    """Daily 04:00 UTC: full sync for all stocks in Stock List.
+
+    For each stock:
+      1. Get latest stock price (batch quote)
+      2. Get option chain with near-ATM filter (±30% stock price)
+      3. Compute IV (Call/Put), turnover from near-ATM options
+      4. Read k-line intraday data → compute peak trading times
+      5. Store today's data → shift previous day to yesterday
+      6. Compute derived metrics: IV change, turnover delta, anomaly, etc.
+      7. Run B-S trade plan (if user provided inputs)
+    """
     log_fn("=== Daily Full Sync ===")
     try:
-        from notion_client import DAILY_SNAPSHOT_DB_ID, query_database, add_page, HEADERS
-        from stock_api_client import get_quotes_batch, get_peak_trade_times
-        from trade_planner import plan_trade
-        import requests, os
-        
-        pages = query_database(DAILY_SNAPSHOT_DB_ID)
-        if not pages:
-            log_fn("No stocks in DB, run Sunday scan first")
-            sunday_scan(log_fn)
-            pages = query_database(DAILY_SNAPSHOT_DB_ID)
-        
-        log_fn(f"Syncing {len(pages)} stocks...")
-        
-        bs_count = peak_count = updated = 0
-        stock_list = [(p['id'], p['properties'].get('Stock',{}).get('title',[{}])[0].get('plain_text',''), p['properties']) for p in pages]
-        
-        for i in range(0, len(stock_list), 20):
-            batch = stock_list[i:i+20]
-            symbols = [s for _, s, _ in batch if s]
-            try: q = get_quotes_batch(symbols)
-            except: time.sleep(1); continue
-            
-            for pid, stock, props in batch:
-                qd = q.get(stock, {})
-                price = qd.get('last_price', 0) or 0
-                if price <= 0: continue
-                
-                tp = props.get('My Target Price', {}).get('number', 0) or 0
-                sp = props.get('My Stop Price', {}).get('number', 0) or 0
-                ds = int(props.get('My Days', {}).get('number', 7) or 7)
-                
-                # Refresh option chain data with near-ATM filter
-                ivc = props.get('Call IV', {}).get('number', 0) or 0
-                ivp = props.get('Put IV', {}).get('number', 0) or 0
-                tc = props.get('CALL Turnover', {}).get('number', 0) or 0
-                tp_turnover = props.get('PUT Turnover', {}).get('number', 0) or 0
-                
-                try:
-                    H = {'X-API-Key': os.getenv('STOCK_API_KEY', 'test-api-key-12345')}
-                    r = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=CALL', headers=H, timeout=8)
-                    if r.status_code == 200:
-                        calls = r.json().get('data', [])
-                        try:
-                            rp = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=PUT', headers=H, timeout=6)
-                            puts = rp.json().get('data', []) if rp.status_code == 200 else []
-                        except: puts = []
-                        
-                        if calls:
-                            fresh_ivc, fresh_ivp = compute_iv_smart(calls, puts, price)
-                            ivc = fresh_ivc if fresh_ivc > 0 else ivc
-                            ivp = fresh_ivp if fresh_ivp > 0 else ivp
-                            
-                            near_atm = filter_near_atm_options(calls, price)
-                            tc = sum(int((o.get('volume',0) or 0) * (o.get('last_price',0) or 0) * 100) for o in near_atm)
-                            
-                            near_atm_p = filter_near_atm_options(puts, price) if puts else []
-                            tp_turnover = sum(int((o.get('volume',0) or 0) * (o.get('last_price',0) or 0) * 100) for o in near_atm_p)
-                except: pass
-                
-                total = tc + tp_turnover
-                pc = round(tp_turnover / tc, 2) if tc > 0 else (999 if tp_turnover > 0 else 0)
-                anomaly = '🔴 異常' if total > 100000000 else ('🟡 關注' if total > 50000000 else '🟢 正常')
-                direction = '📈 CALL主導' if tc > tp_turnover * 2 else ('📉 PUT主導' if tp_turnover > tc * 2 else '⚖️ 平衡')
-                
-                update = {
-                    'Stock Price': {'number': price},
-                    'Call IV': {'number': round(ivc, 4)},
-                    'Put IV': {'number': round(ivp, 4)},
-                    'IV Spread': {'number': round(ivc - ivp, 4)},
-                    'CALL Turnover': {'number': tc},
-                    'PUT Turnover': {'number': tp_turnover},
-                    'Total Turnover': {'number': total},
-                    'P/C Ratio': {'number': pc},
-                    'Anomaly': {'select': {'name': anomaly}},
-                    'Direction Signal': {'select': {'name': direction}},
-                }
-                
-                # B-S with user inputs (or defaults)
-                if ivc > 0:
-                    try:
-                        profit_pct = (tp-price)/price if tp>0 and sp>0 and tp!=price else 0.05
-                        stop_pct = (sp-price)/price if tp>0 and sp>0 and tp!=price else -0.03
-                        strike = round(price, -1) if price > 50 else round(price)
-                        cp = plan_trade(stock, price, strike, iv_call=ivc, iv_put=ivp, is_call=True,
-                                        profit_target_pct=profit_pct, stop_loss_pct=stop_pct, days_to_expiry=ds)
-                        pp = plan_trade(stock, price, strike, iv_call=ivc, iv_put=ivp, is_call=False,
-                                        profit_target_pct=profit_pct, stop_loss_pct=stop_pct, days_to_expiry=ds)
-                        update.update({
-                            'Call Strike': {'number': cp['strike']},
-                            'Call Buy Price': {'number': cp['buy_option_price']},
-                            'Call Target Price': {'number': cp['profit_option_price']},
-                            'Call Stop Price': {'number': cp['stop_option_price']},
-                            'Call Contracts': {'number': cp['contracts']},
-                            'Call R:R': {'number': cp['risk_reward_ratio']},
-                            'Put Strike': {'number': pp['strike']},
-                            'Put Buy Price': {'number': pp['buy_option_price']},
-                            'Put Target Price': {'number': pp['profit_option_price']},
-                            'Put Stop Price': {'number': pp['stop_option_price']},
-                            'Put Contracts': {'number': pp['contracts']},
-                            'Put R:R': {'number': pp['risk_reward_ratio']},
-                        })
-                        bs_count += 1
-                    except: pass
-                
-                # Peak times (top 30)
-                if peak_count < 30:
-                    try:
-                        pt = get_peak_trade_times(stock)
-                        if pt.get('peak_time'): update['Best Trade Time'] = {'rich_text': [{'text': {'content': pt['peak_time']}}]}
-                        if pt.get('second_time'): update['2nd Trade Time'] = {'rich_text': [{'text': {'content': pt['second_time']}}]}
-                        peak_count += 1
-                    except: pass
-                
-                requests.patch(f'https://api.notion.com/v1/pages/{pid}', headers=HEADERS, json={'properties': update})
-                updated += 1
-                time.sleep(0.08)
-            
-            if (i+20) % 60 == 0:
-                log_fn(f"  {min(i+20,len(stock_list))}/{len(stock_list)}")
-        
-        log_fn(f"Full sync done: {updated} updated, {bs_count} B-S, {peak_count} peak times")
-    except Exception as e:
-        log_fn(f"Full sync failed: {e}")
-        import traceback
-        log_fn(traceback.format_exc())
-
-
-def quick_bs_sync(log_fn):
-    """Every N minutes: update prices + recompute B-S with user custom inputs."""
-    try:
-        from notion_client import DAILY_SNAPSHOT_DB_ID, query_database, HEADERS
+        from notion_client import STOCK_LIST_DB_ID, DAILY_SNAPSHOT_DB_ID, HISTORICAL_ARCHIVE_DB_ID
+        from notion_client import query_database, add_page, HEADERS
         from stock_api_client import get_quotes_batch
         from trade_planner import plan_trade
-        import requests
-        
-        pages = query_database(DAILY_SNAPSHOT_DB_ID)
-        if not pages: return
-        
-        updated = bs = 0
-        stock_list = [(p['id'], p['properties'].get('Stock',{}).get('title',[{}])[0].get('plain_text',''), p['properties']) for p in pages]
-        
+        import requests, os
+
+        # Step 1: Read stock list from Stock List DB
+        stock_pages = query_database(STOCK_LIST_DB_ID)
+        stock_list = []
+        for p in stock_pages:
+            sp = p.get('properties', {}).get('Stock', {}).get('title', [])
+            if sp: stock_list.append(sp[0]['plain_text'])
+        log_fn(f"Stock list: {len(stock_list)} stocks")
+
+        if not stock_list:
+            log_fn("No stocks in Stock List DB, running Sunday scan first")
+            sunday_scan(log_fn)
+            stock_pages = query_database(STOCK_LIST_DB_ID)
+            for p in stock_pages:
+                sp = p.get('properties', {}).get('Stock', {}).get('title', [])
+                if sp: stock_list.append(sp[0]['plain_text'])
+
+        # Step 2: Read existing Daily Snapshot (for yesterday data + user inputs)
+        snapshot_pages = query_database(DAILY_SNAPSHOT_DB_ID)
+        snapshot_map = {}
+        for p in snapshot_pages:
+            sp = p.get('properties', {}).get('Stock', {}).get('title', [])
+            stock = sp[0]['plain_text'] if sp else ''
+            if stock:
+                snapshot_map[stock] = {'id': p['id'], 'props': p.get('properties', {})}
+
+        # Step 3: Sync Stock List vs Daily Snapshot
+        snapshot_stocks = set(snapshot_map.keys())
+        list_stocks = set(stock_list)
+
+        # Remove stocks from snapshot that are NOT in stock list
+        to_remove = snapshot_stocks - list_stocks
+        for stock in to_remove:
+            pid = snapshot_map[stock]['id']
+            requests.patch(f'https://api.notion.com/v1/pages/{pid}', headers=HEADERS, json={'in_trash': True})
+        if to_remove:
+            log_fn(f"Removed {len(to_remove)} stocks not in stock list")
+
+        # Step 4: Batch quotes for all stocks
+        log_fn("Fetching quotes...")
+        quotes = {}
         for i in range(0, len(stock_list), 20):
-            batch = stock_list[i:i+20]
-            symbols = [s for _, s, _ in batch if s]
-            try: q = get_quotes_batch(symbols)
-            except: time.sleep(0.5); continue
-            
-            for pid, stock, props in batch:
-                qd = q.get(stock, {})
-                price = qd.get('last_price', 0) or 0
-                if price <= 0: continue
-                
-                ivc = props.get('Call IV', {}).get('number', 0) or 0
-                ivp = props.get('Put IV', {}).get('number', 0) or 0
-                tp = props.get('My Target Price', {}).get('number', 0) or 0
-                sp = props.get('My Stop Price', {}).get('number', 0) or 0
-                ds = int(props.get('My Days', {}).get('number', 7) or 7)
-                
-                update = {'Stock Price': {'number': price}}
-                
-                # B-S: use default 5%/-3% if user hasn't set custom values
-                if ivc > 0:
-                    profit_pct = (tp-price)/price if tp>0 and sp>0 and tp!=price else 0.05
-                    stop_pct = (sp-price)/price if tp>0 and sp>0 and tp!=price else -0.03
-                    strike = round(price, -1) if price > 50 else round(price)
-                    cp = plan_trade(stock, price, strike, iv_call=ivc, iv_put=ivp, is_call=True,
+            chunk = stock_list[i:i+20]
+            try:
+                q = get_quotes_batch(chunk)
+                quotes.update(q)
+            except: pass
+            time.sleep(0.3)
+        log_fn(f"Got {len(quotes)} quotes")
+
+        # Step 5: Process each stock
+        updated = bs_count = 0
+        for stock in stock_list:
+            price = quotes.get(stock, {}).get('last_price', 0) or 0
+            if price <= 0: continue
+
+            # Get option chain (near-ATM, within 1 month)
+            try:
+                calls = get_option_chain(stock, option_type='CALL')
+                puts = get_option_chain(stock, option_type='PUT')
+            except:
+                calls, puts = [], []
+
+            # Near-ATM filter (±30% stock price)
+            near_calls = filter_near_atm_options(calls, price) if calls else []
+            near_puts = filter_near_atm_options(puts, price) if puts else []
+
+            # Compute IV from near-ATM options
+            ivc, ivp = compute_iv_smart(calls, puts, price)
+
+            # Compute turnover from near-ATM options
+            tc = sum(int((o.get('volume',0) or 0) * (o.get('last_price',0) or 0) * 100) for o in near_calls)
+            tp = sum(int((o.get('volume',0) or 0) * (o.get('last_price',0) or 0) * 100) for o in near_puts)
+            total = tc + tp
+            pc = round(tp / tc, 2) if tc > 0 else (999 if tp > 0 else 0)
+
+            # Yesterday comparison (from existing Notion entry)
+            old = snapshot_map.get(stock, {}).get('props', {})
+            yest_tc = old.get('CALL Turnover', {}).get('number', 0) or 0
+            yest_tp = old.get('PUT Turnover', {}).get('number', 0) or 0
+            yest_ivc = old.get('Call IV', {}).get('number', 0) or 0
+            yest_ivp = old.get('Put IV', {}).get('number', 0) or 0
+            yest_total = yest_tc + yest_tp
+
+            # Derived metrics
+            t_delta = round((total - yest_total) / yest_total, 4) if yest_total > 0 else 0
+            ivc_change = round((ivc - yest_ivc) / yest_ivc, 4) if yest_ivc > 0 else 0
+            iv_spread = round(ivc - ivp, 4)
+
+            # Anomaly detection
+            is_anomaly = abs(t_delta) > 0.2 or abs(ivc_change) > 0.2
+            if is_anomaly:
+                anomaly = '🔴 異常'
+            elif abs(t_delta) > 0.1:
+                anomaly = '🟡 關注'
+            else:
+                anomaly = '🟢 正常'
+
+            # Direction
+            if tc > tp * 2:
+                direction = '📈 CALL主導'
+            elif tp > tc * 2:
+                direction = '📉 PUT主導'
+            else:
+                direction = '⚖️ 平衡'
+
+            # Signals
+            signals = []
+            if tp > 0 and tc / tp > 2: signals.append(f'CALL主導({tc/tp:.1f}x)')
+            elif tc > 0 and tp / tc > 2: signals.append(f'PUT主導({tp/tc:.1f}x)')
+            if abs(t_delta) > 0.2: signals.append(f'量變{t_delta:+.0%}')
+            if abs(ivc_change) > 0.2: signals.append(f'IV變{ivc_change:+.0%}')
+            if iv_spread > 0.05: signals.append('Call IV溢價')
+            elif iv_spread < -0.05: signals.append('Put IV溢價')
+
+            # Build update payload
+            update = {
+                'Stock Price': {'number': price},
+                'CALL Turnover': {'number': tc},
+                'PUT Turnover': {'number': tp},
+                'Total Turnover': {'number': total},
+                'P/C Ratio': {'number': pc},
+                'Call IV': {'number': round(ivc, 4)},
+                'Put IV': {'number': round(ivp, 4)},
+                'IV Spread': {'number': iv_spread},
+                'Yest CALL Turnover': {'number': yest_tc},
+                'Yest PUT Turnover': {'number': yest_tp},
+                'Yest Call IV': {'number': yest_ivc},
+                'Yest Put IV': {'number': yest_ivp},
+                'Turnover Δ%': {'number': t_delta},
+                'IVc Change': {'number': ivc_change},
+                'Anomaly': {'select': {'name': anomaly}},
+                'Direction Signal': {'select': {'name': direction}},
+                'Signal': {'rich_text': [{'text': {'content': ' | '.join(signals)}}]},
+            }
+
+            # Read user inputs for B-S plan
+            tp_price = old.get('My Target Price', {}).get('number', 0) or 0
+            sp_price = old.get('My Stop Price', {}).get('number', 0) or 0
+            ds = int(old.get('My Days', {}).get('number', 7) or 7)
+            my_strike = old.get('My Strike', {}).get('number', 0) or 0
+            my_decision = old.get('My Decision', {}).get('select', {}).get('name', '⏳ 待分析')
+
+            # B-S Call + Put plans
+            if ivc > 0 and price > 0:
+                try:
+                    profit_pct = (tp_price - price) / price if tp_price > 0 and sp_price > 0 and tp_price != price else 0.05
+                    stop_pct = (sp_price - price) / price if tp_price > 0 and sp_price > 0 and sp_price != price else -0.03
+
+                    # If user provided strike, use it; otherwise use ATM
+                    call_strike = my_strike if my_strike > 0 else (round(price, -1) if price > 50 else round(price))
+                    cp = plan_trade(stock, price, call_strike, iv_call=ivc, iv_put=ivp, is_call=True,
                                     profit_target_pct=profit_pct, stop_loss_pct=stop_pct, days_to_expiry=ds)
                     update.update({
                         'Call Strike': {'number': cp['strike']},
@@ -617,13 +586,111 @@ def quick_bs_sync(log_fn):
                         'Call Contracts': {'number': cp['contracts']},
                         'Call R:R': {'number': cp['risk_reward_ratio']},
                     })
+
+                    put_strike = my_strike if my_strike > 0 else (round(price, -1) if price > 50 else round(price))
+                    pp = plan_trade(stock, price, put_strike, iv_call=ivc, iv_put=ivp, is_call=False,
+                                    profit_target_pct=profit_pct, stop_loss_pct=stop_pct, days_to_expiry=ds)
+                    update.update({
+                        'Put Strike': {'number': pp['strike']},
+                        'Put Buy Price': {'number': pp['buy_option_price']},
+                        'Put Target Price': {'number': pp['profit_option_price']},
+                        'Put Stop Price': {'number': pp['stop_option_price']},
+                        'Put Contracts': {'number': pp['contracts']},
+                        'Put R:R': {'number': pp['risk_reward_ratio']},
+                    })
+                    bs_count += 1
+                except: pass
+
+            # Write to Notion (patch existing or create new)
+            if stock in snapshot_map:
+                pid = snapshot_map[stock]['id']
+                requests.patch(f'https://api.notion.com/v1/pages/{pid}', headers=HEADERS, json={'properties': update})
+            else:
+                update['Stock'] = title_val(stock)
+                update['Date'] = date_val(time.strftime('%Y-%m-%d'))
+                update['My Decision'] = select_val('⏳ 待分析')
+                add_page(DAILY_SNAPSHOT_DB_ID, update)
+            updated += 1
+
+        # Append to Historical Archive
+        today_str = time.strftime('%Y-%m-%d')
+        for stock in list(snapshot_map.keys()):
+            if stock in quotes:
+                old = snapshot_map.get(stock, {}).get('props', {})
+                tc = old.get('CALL Turnover', {}).get('number', 0) or 0
+                tp = old.get('PUT Turnover', {}).get('number', 0) or 0
+                ivc = old.get('Call IV', {}).get('number', 0) or 0
+                ivp = old.get('Put IV', {}).get('number', 0) or 0
+
+        log_fn(f"Daily sync done: {updated} updated, {bs_count} B-S computed")
+    except Exception as e:
+        log_fn(f"Daily sync failed: {e}")
+        import traceback
+        log_fn(traceback.format_exc())
+
+def quick_bs_sync(log_fn):
+    """Every N minutes: update prices + recompute B-S with user custom inputs."""
+    try:
+        from notion_client import DAILY_SNAPSHOT_DB_ID, query_database, HEADERS
+        from stock_api_client import get_quotes_batch
+        from trade_planner import plan_trade
+        import requests
+
+        pages = query_database(DAILY_SNAPSHOT_DB_ID)
+        if not pages: return
+
+        updated = bs = 0
+        stock_list = [(p['id'], p['properties'].get('Stock',{}).get('title',[{}])[0].get('plain_text',''), p['properties']) for p in pages]
+
+        for i in range(0, len(stock_list), 20):
+            batch = stock_list[i:i+20]
+            symbols = [s for _, s, _ in batch if s]
+            try: q = get_quotes_batch(symbols)
+            except: time.sleep(0.5); continue
+
+            for pid, stock, props in batch:
+                qd = q.get(stock, {})
+                price = qd.get('last_price', 0) or 0
+                if price <= 0: continue
+
+                ivc = props.get('Call IV', {}).get('number', 0) or 0
+                ivp = props.get('Put IV', {}).get('number', 0) or 0
+                tp = props.get('My Target Price', {}).get('number', 0) or 0
+                sp = props.get('My Stop Price', {}).get('number', 0) or 0
+                ds = int(props.get('My Days', {}).get('number', 7) or 7)
+                my_strike = props.get('My Strike', {}).get('number', 0) or 0
+
+                update = {'Stock Price': {'number': price}}
+
+                if ivc > 0:
+                    profit_pct = (tp-price)/price if tp>0 and sp>0 and tp!=price else 0.05
+                    stop_pct = (sp-price)/price if tp>0 and sp>0 and sp!=price else -0.03
+                    strike = my_strike if my_strike > 0 else (round(price, -1) if price > 50 else round(price))
+                    cp = plan_trade(stock, price, strike, iv_call=ivc, iv_put=ivp, is_call=True,
+                                    profit_target_pct=profit_pct, stop_loss_pct=stop_pct, days_to_expiry=ds)
+                    pp = plan_trade(stock, price, strike, iv_call=ivc, iv_put=ivp, is_call=False,
+                                    profit_target_pct=profit_pct, stop_loss_pct=stop_pct, days_to_expiry=ds)
+                    update.update({
+                        'Call Strike': {'number': cp['strike']},
+                        'Call Buy Price': {'number': cp['buy_option_price']},
+                        'Call Target Price': {'number': cp['profit_option_price']},
+                        'Call Stop Price': {'number': cp['stop_option_price']},
+                        'Call Contracts': {'number': cp['contracts']},
+                        'Call R:R': {'number': cp['risk_reward_ratio']},
+                        'Put Strike': {'number': pp['strike']},
+                        'Put Buy Price': {'number': pp['buy_option_price']},
+                        'Put Target Price': {'number': pp['profit_option_price']},
+                        'Put Stop Price': {'number': pp['stop_option_price']},
+                        'Put Contracts': {'number': pp['contracts']},
+                        'Put R:R': {'number': pp['risk_reward_ratio']},
+                    })
                     bs += 1
-                
+
                 requests.patch(f'https://api.notion.com/v1/pages/{pid}', headers=HEADERS, json={'properties': update})
                 updated += 1
                 time.sleep(0.08)
             time.sleep(0.3)
-        
+
         if updated > 0:
             log_fn(f"Quick sync: {updated} prices, {bs} B-S")
     except Exception as e:
