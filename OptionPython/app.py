@@ -12,8 +12,6 @@ from stock_api_client import (
     get_quotes_batch,
     get_option_chain,
     get_macd,
-    get_all_us_stocks,
-    get_intraday_kline,
 )
 
 # === 設定參數 ===
@@ -213,12 +211,18 @@ def run_once(
 
 
 
-    # 讀取股票清單（動態從 Stock API 獲取）
-    cache_path = os.path.join(os.path.dirname(__file__), "us_stocks_cache.json")
-    stock_list = get_all_us_stocks(cache_path=cache_path)
+    # 讀取股票清單（從 Stock List DB）
+    try:
+        from notion_client import STOCK_LIST_DB_ID, query_database
+        stock_pages = query_database(STOCK_LIST_DB_ID)
+        stock_list = []
+        for p in stock_pages:
+            sp = p.get('properties', {}).get('Stock', {}).get('title', [])
+            if sp: stock_list.append(sp[0]['plain_text'])
+    except Exception:
+        stock_list = []
     if not stock_list:
-        log_fn("無法獲取美股列表，使用內建 fallback 清單")
-        log_fn("請確認 Stock API 可連線")
+        log_fn("無法獲取美股列表")
         return
     log_fn(f"使用 {len(stock_list)} 隻美股 (來源: Stock API)")
 
@@ -348,95 +352,6 @@ def run_once(
 
     if publish_result_fn is not None:
         publish_result_fn(df_result)
-
-
-def sunday_scan(log_fn):
-    """Sunday: scan top 500 stocks for options, save stock list to Stock List DB."""
-    log_fn("=== Sunday Scan: Rebuilding option stock list ===")
-    try:
-        from notion_client import STOCK_LIST_DB_ID, query_database, add_page, HEADERS
-        import requests, json, os
-
-        # Load all US stocks
-        cache_path = os.path.join(os.path.dirname(__file__), "us_stocks_cache.json")
-        all_stocks = get_all_us_stocks(cache_path=cache_path)
-        log_fn(f"Full stock list: {len(all_stocks)}")
-
-        # Batch quotes (50 per chunk)
-        log_fn("Batch fetching quotes...")
-        quotes = {}
-        for i in range(0, len(all_stocks), 50):
-            try:
-                q = get_quotes_batch(all_stocks[i:i+50])
-                quotes.update(q)
-            except: pass
-            time.sleep(0.3)
-        log_fn(f"Got {len(quotes)} quotes")
-
-        # Top 500 by turnover
-        ranked = [(s, q.get('turnover', 0) or 0) for s, q in quotes.items()]
-        ranked.sort(key=lambda x: x[1], reverse=True)
-        top500 = [s for s, _ in ranked[:500]]
-        log_fn(f"Top 500 by turnover")
-
-        # Check option chains: must have >= 2 near-ATM options with volume
-        log_fn("Checking option chains (min 2 active near-ATM options)...")
-        option_stocks = []
-        for i, stock in enumerate(top500):
-            has_options = False
-            active_calls = active_puts = 0
-            price = quotes.get(stock, {}).get('last_price', 0) or 0
-            calls = get_option_chain(stock, option_type='CALL')
-            puts = get_option_chain(stock, option_type='PUT')
-            near_calls = filter_near_atm_options(calls, price) if calls else []
-            near_puts = filter_near_atm_options(puts, price) if puts else []
-            active_calls = sum(1 for o in near_calls if (o.get('volume', 0) or 0) > 0)
-            active_puts = sum(1 for o in near_puts if (o.get('volume', 0) or 0) > 0)
-            if active_calls + active_puts >= 2:
-                option_stocks.append(stock)
-            if (i+1) % 50 == 0:
-                log_fn(f"  {i+1}/500: {len(option_stocks)} have options (last: {stock} C{active_calls}+P{active_puts})")
-
-        log_fn(f"Stocks with options: {len(option_stocks)}")
-
-        # Sync to Stock List DB: remove old, add new
-        pages = query_database(STOCK_LIST_DB_ID)
-        existing = set()
-        for p in pages:
-            sp = p.get('properties', {}).get('Stock', {}).get('title', [])
-            if sp: existing.add(sp[0]['plain_text'])
-
-        # Trash old entries not in new list
-        for p in pages:
-            sp = p.get('properties', {}).get('Stock', {}).get('title', [])
-            stock = sp[0]['plain_text'] if sp else ''
-            if stock and stock not in set(option_stocks):
-                requests.patch(f'https://api.notion.com/v1/pages/{p["id"]}', headers=HEADERS, json={'in_trash': True})
-
-        # Add new entries
-        today_str = time.strftime('%Y-%m-%d')
-        added = 0
-        for stock in option_stocks:
-            if stock not in existing:
-                add_page(STOCK_LIST_DB_ID, {
-                    'Stock': title_val(stock),
-                    'Active': checkbox_val(True),
-                    'Last Checked': date_val(today_str),
-                })
-                added += 1
-                time.sleep(0.15)
-
-        # Save cache file
-        with open(os.path.join(os.path.dirname(__file__), "option_stock_list.json"), 'w') as f:
-            json.dump({'updated': today_str, 'count': len(option_stocks), 'stocks': option_stocks}, f)
-
-        log_fn(f"Sunday scan complete: {len(option_stocks)} stocks, {added} new")
-    except Exception as e:
-        log_fn(f"Sunday scan failed: {e}")
-        import traceback
-        log_fn(traceback.format_exc())
-
-
 def daily_full_sync(log_fn):
     """Daily 04:00 UTC: full sync for all stocks in Stock List.
 
@@ -466,9 +381,8 @@ def daily_full_sync(log_fn):
         log_fn(f"Stock list: {len(stock_list)} stocks")
 
         if not stock_list:
-            log_fn("No stocks in Stock List DB, running Sunday scan first")
-            sunday_scan(log_fn)
-            stock_pages = query_database(STOCK_LIST_DB_ID)
+            log_fn("No stocks in Stock List DB. Please populate manually via Notion.")
+            return
             for p in stock_pages:
                 sp = p.get('properties', {}).get('Stock', {}).get('title', [])
                 if sp: stock_list.append(sp[0]['plain_text'])
@@ -760,7 +674,6 @@ def run_scheduler(
     publish_result_fn: Optional[Callable[[pd.DataFrame], None]] = None,
     stop_event: Optional[threading.Event] = None,
 ) -> None:
-    last_sunday_scan = None
     last_full_sync = None
     last_quick_sync = None
 
@@ -770,15 +683,8 @@ def run_scheduler(
 
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
-        weekday = now.weekday()  # 0=Mon, 6=Sun
         
-        # 1. Sunday scan: once on Sunday
-        if weekday == 6 and last_sunday_scan != today:
-            last_sunday_scan = today
-            sunday_scan(log_fn)
-            log_fn(f"Sunday scan completed for {today}")
-        
-        # 2. Daily full sync at TARGET_HOUR:TARGET_MINUTE
+        # Daily full sync at TARGET_HOUR:TARGET_MINUTE
         current_hour = now.strftime("%H")
         current_minute = now.strftime("%M")
         if current_hour == TARGET_HOUR and current_minute == TARGET_MINUTE and last_full_sync != today:
