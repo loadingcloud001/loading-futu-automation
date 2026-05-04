@@ -360,13 +360,7 @@ def sunday_scan(log_fn):
                 
                 tc = 0; civs = []
                 price = quotes.get(stock, {}).get('last_price', 0) or 0
-                # Also get PUTs for IV fallback
-                try:
-                    rp = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=PUT', headers=H, timeout=6)
-                    puts = rp.json().get('data', []) if rp.status_code == 200 else []
-                except: puts = []
-                
-                price = quotes.get(stock, {}).get('last_price', 0) or 0
+                # Compute smart IV from near-ATM options
                 ivc, ivp = compute_iv_smart(calls, puts, price)
                 
                 near_atm = filter_near_atm_options(calls, price)
