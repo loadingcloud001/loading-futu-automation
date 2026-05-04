@@ -476,7 +476,7 @@ def daily_full_sync(log_fn):
         log_fn(f"Got {len(quotes)} quotes")
 
         # Step 5: Process each stock
-        updated = bs_count = 0
+        updated = bs_count = peak_count = 0
         for stock in stock_list:
             price = quotes.get(stock, {}).get('last_price', 0) or 0
             if price <= 0: continue
@@ -601,18 +601,18 @@ def daily_full_sync(log_fn):
                     bs_count += 1
                 except: pass
 
-            # Peak trade times (from capital flow data, top 30 stocks)
-            if updated < 30:
-                try:
-                    from stock_api_client import get_peak_trade_times
-                    pt = get_peak_trade_times(stock)
-                    if pt.get('peak_time'):
-                        update['Peak Time'] = {'rich_text': [{'text': {'content': pt['peak_time']}}]}
-                    if pt.get('second_time'):
-                        update['2nd Peak Time'] = {'rich_text': [{'text': {'content': pt['second_time']}}]}
-                    if pt.get('low_time'):
-                        update['Low Time'] = {'rich_text': [{'text': {'content': pt['low_time']}}]}
-                except: pass
+            # Peak trade times (from capital flow data)
+            peak_count += 1
+            try:
+                from stock_api_client import get_peak_trade_times
+                pt = get_peak_trade_times(stock)
+                if pt.get('peak_time'):
+                    update['Peak Time'] = {'rich_text': [{'text': {'content': pt['peak_time']}}]}
+                if pt.get('second_time'):
+                    update['2nd Peak Time'] = {'rich_text': [{'text': {'content': pt['second_time']}}]}
+                if pt.get('low_time'):
+                    update['Low Time'] = {'rich_text': [{'text': {'content': pt['low_time']}}]}
+            except: pass
 
             # Write to Notion (patch existing or create new)
             if stock in snapshot_map:
