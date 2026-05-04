@@ -448,10 +448,10 @@ def daily_full_sync(log_fn):
 
             # Yesterday comparison (from existing Notion entry)
             old = snapshot_map.get(stock, {}).get('props', {})
-            yest_tc = old.get('CALL Turnover', {}).get('number', 0) or 0
-            yest_tp = old.get('PUT Turnover', {}).get('number', 0) or 0
-            yest_ivc = old.get('Call IV', {}).get('number', 0) or 0
-            yest_ivp = old.get('Put IV', {}).get('number', 0) or 0
+            yest_tc = old.get('10-CALL Turnover', {}).get('number', 0) or 0
+            yest_tp = old.get('11-PUT Turnover', {}).get('number', 0) or 0
+            yest_ivc = old.get('20-Call IV', {}).get('number', 0) or 0
+            yest_ivp = old.get('21-Put IV', {}).get('number', 0) or 0
             yest_total = yest_tc + yest_tp
 
             # Derived metrics
@@ -496,36 +496,36 @@ def daily_full_sync(log_fn):
 
             # Build update payload
             update = {
-                'Stock Price': {'number': price},
-                'CALL Turnover': {'number': tc},
-                'PUT Turnover': {'number': tp},
-                'Total Turnover': {'number': total},
-                'P/C Ratio': {'number': pc},
-                'Call IV': {'number': round(ivc, 4)},
-                'Put IV': {'number': round(ivp, 4)},
-                'IV Spread': {'number': iv_spread},
-                'Yest CALL Turnover': {'number': yest_tc},
-                'Yest PUT Turnover': {'number': yest_tp},
-                'Yest Call IV': {'number': yest_ivc},
-                'Yest Put IV': {'number': yest_ivp},
-                'Turnover Δ%': {'number': t_delta},
-                'IVc Change': {'number': ivc_change},
-                'IV Rank': {'number': iv_rank},
-                'IV Trend Score': {'number': ivc_change * 100},
-                'Volume Momentum': {'number': t_delta},
-                'Anomaly Streak': {'number': 0},
-                'Trend Summary': {'rich_text': [{'text': {'content': ' | '.join(trend_parts)}}]},
-                'Anomaly': {'select': {'name': anomaly}},
-                'Direction Signal': {'select': {'name': direction}},
-                'Signal': {'rich_text': [{'text': {'content': ' | '.join(signals)}}]},
+                '02-Stock Price': {'number': price},
+                '10-CALL Turnover': {'number': tc},
+                '11-PUT Turnover': {'number': tp},
+                '12-Total Turnover': {'number': total},
+                '13-P/C Ratio': {'number': pc},
+                '20-Call IV': {'number': round(ivc, 4)},
+                '21-Put IV': {'number': round(ivp, 4)},
+                '22-IV Spread': {'number': iv_spread},
+                '25-Yest CALL Turnover': {'number': yest_tc},
+                '26-Yest PUT Turnover': {'number': yest_tp},
+                '27-Yest Call IV': {'number': yest_ivc},
+                '28-Yest Put IV': {'number': yest_ivp},
+                '30-Turnover Δ%': {'number': t_delta},
+                '31-IVc Change': {'number': ivc_change},
+                '35-IV Rank': {'number': iv_rank},
+                '36-IV Trend Score': {'number': ivc_change * 100},
+                '37-Volume Momentum': {'number': t_delta},
+                '38-Anomaly Streak': {'number': 0},
+                '39-Trend Summary': {'rich_text': [{'text': {'content': ' | '.join(trend_parts)}}]},
+                '60-Anomaly': {'select': {'name': anomaly}},
+                '61-Direction Signal': {'select': {'name': direction}},
+                '62-Signal': {'rich_text': [{'text': {'content': ' | '.join(signals)}}]},
             }
 
             # Read user inputs for B-S plan
-            tp_price = old.get('My Target Price', {}).get('number', 0) or 0
-            sp_price = old.get('My Stop Price', {}).get('number', 0) or 0
-            ds = int(old.get('My Days', {}).get('number', 7) or 7)
-            my_strike = old.get('My Strike', {}).get('number', 0) or 0
-            my_decision = old.get('My Decision', {}).get('select', {}).get('name', '⏳ 待分析')
+            tp_price = old.get('04-My Target Price', {}).get('number', 0) or 0
+            sp_price = old.get('05-My Stop Price', {}).get('number', 0) or 0
+            ds = int(old.get('06-My Days', {}).get('number', 7) or 7)
+            my_strike = old.get('07-My Strike', {}).get('number', 0) or 0
+            my_decision = old.get('03-My Decision', {}).get('select', {}).get('name', '⏳ 待分析')
 
             # B-S Call + Put plans
             if ivc > 0 and price > 0:
@@ -538,24 +538,24 @@ def daily_full_sync(log_fn):
                     cp = plan_trade(stock, price, call_strike, iv_call=ivc, iv_put=ivp, is_call=True,
                                     profit_target_pct=profit_pct, stop_loss_pct=stop_pct, days_to_expiry=ds)
                     update.update({
-                        'Call Strike': {'number': cp['strike']},
-                        'Call Buy Price': {'number': cp['buy_option_price']},
-                        'Call Target Price': {'number': cp['profit_option_price']},
-                        'Call Stop Price': {'number': cp['stop_option_price']},
-                        'Call Contracts': {'number': cp['contracts']},
-                        'Call R:R': {'number': cp['risk_reward_ratio']},
+                        '40-Call Strike': {'number': cp['strike']},
+                        '41-Call Buy Price': {'number': cp['buy_option_price']},
+                        '42-Call Target Price': {'number': cp['profit_option_price']},
+                        '43-Call Stop Price': {'number': cp['stop_option_price']},
+                        '44-Call Contracts': {'number': cp['contracts']},
+                        '45-Call R:R': {'number': cp['risk_reward_ratio']},
                     })
 
                     put_strike = my_strike if my_strike > 0 else (round(price, -1) if price > 50 else round(price))
                     pp = plan_trade(stock, price, put_strike, iv_call=ivc, iv_put=ivp, is_call=False,
                                     profit_target_pct=profit_pct, stop_loss_pct=stop_pct, days_to_expiry=ds)
                     update.update({
-                        'Put Strike': {'number': pp['strike']},
-                        'Put Buy Price': {'number': pp['buy_option_price']},
-                        'Put Target Price': {'number': pp['profit_option_price']},
-                        'Put Stop Price': {'number': pp['stop_option_price']},
-                        'Put Contracts': {'number': pp['contracts']},
-                        'Put R:R': {'number': pp['risk_reward_ratio']},
+                        '46-Put Strike': {'number': pp['strike']},
+                        '47-Put Buy Price': {'number': pp['buy_option_price']},
+                        '48-Put Target Price': {'number': pp['profit_option_price']},
+                        '49-Put Stop Price': {'number': pp['stop_option_price']},
+                        '50-Put Contracts': {'number': pp['contracts']},
+                        '51-Put R:R': {'number': pp['risk_reward_ratio']},
                     })
                     bs_count += 1
                 except: pass
@@ -566,11 +566,11 @@ def daily_full_sync(log_fn):
                 from stock_api_client import get_peak_trade_times
                 pt = get_peak_trade_times(stock)
                 if pt.get('peak_time'):
-                    update['Peak Time'] = {'rich_text': [{'text': {'content': pt['peak_time']}}]}
+                    update['55-Peak Time'] = {'rich_text': [{'text': {'content': pt['peak_time']}}]}
                 if pt.get('second_time'):
-                    update['2nd Peak Time'] = {'rich_text': [{'text': {'content': pt['second_time']}}]}
+                    update['56-2nd Peak Time'] = {'rich_text': [{'text': {'content': pt['second_time']}}]}
                 if pt.get('low_time'):
-                    update['Low Time'] = {'rich_text': [{'text': {'content': pt['low_time']}}]}
+                    update['57-Low Time'] = {'rich_text': [{'text': {'content': pt['low_time']}}]}
             except: pass
 
             # Write to Notion (patch existing or create new)
@@ -580,7 +580,7 @@ def daily_full_sync(log_fn):
             else:
                 update['Stock'] = title_val(stock)
                 update['Date'] = date_val(time.strftime('%Y-%m-%d'))
-                update['My Decision'] = select_val('⏳ 待分析')
+                update['03-My Decision'] = select_val('⏳ 待分析')
                 add_page(DAILY_SNAPSHOT_DB_ID, update)
             updated += 1
 
@@ -589,10 +589,10 @@ def daily_full_sync(log_fn):
         for stock in list(snapshot_map.keys()):
             if stock in quotes:
                 old = snapshot_map.get(stock, {}).get('props', {})
-                tc = old.get('CALL Turnover', {}).get('number', 0) or 0
-                tp = old.get('PUT Turnover', {}).get('number', 0) or 0
-                ivc = old.get('Call IV', {}).get('number', 0) or 0
-                ivp = old.get('Put IV', {}).get('number', 0) or 0
+                tc = old.get('10-CALL Turnover', {}).get('number', 0) or 0
+                tp = old.get('11-PUT Turnover', {}).get('number', 0) or 0
+                ivc = old.get('20-Call IV', {}).get('number', 0) or 0
+                ivp = old.get('21-Put IV', {}).get('number', 0) or 0
 
         log_fn(f"Daily sync done: {updated} updated, {bs_count} B-S computed")
     except Exception as e:
@@ -625,14 +625,14 @@ def quick_bs_sync(log_fn):
                 price = qd.get('last_price', 0) or 0
                 if price <= 0: continue
 
-                ivc = props.get('Call IV', {}).get('number', 0) or 0
-                ivp = props.get('Put IV', {}).get('number', 0) or 0
-                tp = props.get('My Target Price', {}).get('number', 0) or 0
-                sp = props.get('My Stop Price', {}).get('number', 0) or 0
-                ds = int(props.get('My Days', {}).get('number', 7) or 7)
-                my_strike = props.get('My Strike', {}).get('number', 0) or 0
+                ivc = props.get('20-Call IV', {}).get('number', 0) or 0
+                ivp = props.get('21-Put IV', {}).get('number', 0) or 0
+                tp = props.get('04-My Target Price', {}).get('number', 0) or 0
+                sp = props.get('05-My Stop Price', {}).get('number', 0) or 0
+                ds = int(props.get('06-My Days', {}).get('number', 7) or 7)
+                my_strike = props.get('07-My Strike', {}).get('number', 0) or 0
 
-                update = {'Stock Price': {'number': price}}
+                update = {'02-Stock Price': {'number': price}}
 
                 if ivc > 0:
                     profit_pct = (tp-price)/price if tp>0 and sp>0 and tp!=price else 0.05
@@ -643,18 +643,18 @@ def quick_bs_sync(log_fn):
                     pp = plan_trade(stock, price, strike, iv_call=ivc, iv_put=ivp, is_call=False,
                                     profit_target_pct=profit_pct, stop_loss_pct=stop_pct, days_to_expiry=ds)
                     update.update({
-                        'Call Strike': {'number': cp['strike']},
-                        'Call Buy Price': {'number': cp['buy_option_price']},
-                        'Call Target Price': {'number': cp['profit_option_price']},
-                        'Call Stop Price': {'number': cp['stop_option_price']},
-                        'Call Contracts': {'number': cp['contracts']},
-                        'Call R:R': {'number': cp['risk_reward_ratio']},
-                        'Put Strike': {'number': pp['strike']},
-                        'Put Buy Price': {'number': pp['buy_option_price']},
-                        'Put Target Price': {'number': pp['profit_option_price']},
-                        'Put Stop Price': {'number': pp['stop_option_price']},
-                        'Put Contracts': {'number': pp['contracts']},
-                        'Put R:R': {'number': pp['risk_reward_ratio']},
+                        '40-Call Strike': {'number': cp['strike']},
+                        '41-Call Buy Price': {'number': cp['buy_option_price']},
+                        '42-Call Target Price': {'number': cp['profit_option_price']},
+                        '43-Call Stop Price': {'number': cp['stop_option_price']},
+                        '44-Call Contracts': {'number': cp['contracts']},
+                        '45-Call R:R': {'number': cp['risk_reward_ratio']},
+                        '46-Put Strike': {'number': pp['strike']},
+                        '47-Put Buy Price': {'number': pp['buy_option_price']},
+                        '48-Put Target Price': {'number': pp['profit_option_price']},
+                        '49-Put Stop Price': {'number': pp['stop_option_price']},
+                        '50-Put Contracts': {'number': pp['contracts']},
+                        '51-Put R:R': {'number': pp['risk_reward_ratio']},
                     })
                     bs += 1
 
