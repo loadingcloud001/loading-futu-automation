@@ -346,16 +346,29 @@ def sunday_scan(log_fn):
         top500 = [s for s, _ in ranked[:500]]
         log_fn(f"Top 500 by turnover")
 
-        # Check option chains (if chain returns data = has options)
-        log_fn("Checking option chains...")
-        H = {'X-API-Key': os.getenv('STOCK_API_KEY', 'test-api-key-12345')}
+        # Check option chains: must have >= 2 near-ATM options with volume
+        log_fn("Checking option chains (min 2 active near-ATM options)...")
         option_stocks = []
         for i, stock in enumerate(top500):
             has_options = False
             for attempt in range(2):
                 try:
                     r = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=CALL', headers=H, timeout=10)
-                    if r.status_code == 200 and r.json().get('data'):
+                    if r.status_code != 200: continue
+                    calls = r.json().get('data', [])
+                    if not calls: continue
+                    
+                    rp = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=PUT', headers=H, timeout=8)
+                    puts = rp.json().get('data', []) if rp.status_code == 200 else []
+                    
+                    price = quotes.get(stock, {}).get('last_price', 0) or 0
+                    near_calls = filter_near_atm_options(calls, price) if calls else []
+                    near_puts = filter_near_atm_options(puts, price) if puts else []
+                    
+                    active_calls = sum(1 for o in near_calls if (o.get('volume', 0) or 0) > 0)
+                    active_puts = sum(1 for o in near_puts if (o.get('volume', 0) or 0) > 0)
+                    
+                    if active_calls + active_puts >= 2:
                         has_options = True
                         break
                     time.sleep(1)
@@ -363,7 +376,8 @@ def sunday_scan(log_fn):
             if has_options:
                 option_stocks.append(stock)
             if (i+1) % 100 == 0:
-                log_fn(f"  {i+1}/500: {len(option_stocks)} have options")
+                log_fn(f"  {i+1}/500: {len(option_stocks)} have options ({active_calls}C + {active_puts}P)")
+            time.sleep(0.15)
             time.sleep(0.15)
 
         log_fn(f"Stocks with options: {len(option_stocks)}")
