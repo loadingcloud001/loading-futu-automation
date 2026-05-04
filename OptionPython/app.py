@@ -376,7 +376,7 @@ def sunday_scan(log_fn):
                     if v > 0: tc += int(v * p * 100)
                 
                 optionable[stock] = {
-                    'tc': tc, 'ivc': ivc/100, 'ivp': ivp/100,
+                    'tc': tc, 'ivc': ivc, 'ivp': ivp,
                     'price': price,
                 }
             except: pass
