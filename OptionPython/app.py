@@ -23,6 +23,51 @@ SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "0"))  # 0 = dail
 
 
 # === 工具函式 ===
+# === Option chain filter ===
+def filter_near_atm_options(options: list, stock_price: float, pct_range: float = 0.30) -> list:
+    """Filter options to near-ATM strikes (±30% of stock price)."""
+    if stock_price <= 0:
+        return options
+    lo = stock_price * (1 - pct_range)
+    hi = stock_price * (1 + pct_range)
+    return [o for o in options if lo <= (o.get('strike_price', 0) or 0) <= hi]
+
+def compute_iv_smart(calls: list, puts: list, stock_price: float) -> tuple:
+    """Get best IV as decimal (0-2.0). Uses near-ATM, falls back to other side."""
+    def safe_ivs(options, filter_atm=True):
+        opts = filter_near_atm_options(options, stock_price) if filter_atm else options
+        vals = []
+        for o in opts:
+            iv = o.get('implied_volatility', 0) or 0  # Futu API: percentage
+            delta = abs(o.get('delta', 0) or 0)
+            # Only options with reasonable IV and near-ATM delta
+            if 10 < iv < 300 and (not filter_atm or 0.15 < delta < 0.85):
+                vals.append(iv / 100.0)  # Convert to decimal
+        return sorted(vals)  # Sorted for median
+    
+    # Try near-ATM calls (use median for robustness)
+    civs = safe_ivs(calls, True)
+    ivc = civs[len(civs)//2] if civs else 0
+    
+    # Try near-ATM puts (use median for robustness)
+    pivs = safe_ivs(puts, True)
+    ivp = pivs[len(pivs)//2] if pivs else 0
+    
+    # Fallback: use other side
+    if ivc <= 0 and ivp > 0:
+        ivc = ivp * 1.05
+    if ivp <= 0 and ivc > 0:
+        ivp = ivc * 0.95
+    
+    # Wider fallback: full chain
+    if ivc <= 0:
+        all_c = safe_ivs(calls, False)
+        ivc = sum(all_c) / len(all_c) if all_c else 0.40
+    if ivp <= 0:
+        all_p = safe_ivs(puts, False)
+        ivp = sum(all_p) / len(all_p) if all_p else ivc * 0.95
+    
+    return round(ivc, 4), round(ivp, 4)
 def format_log_line(msg: str) -> str:
     return f"[{datetime.now()}] {msg}"
 
@@ -314,14 +359,25 @@ def sunday_scan(log_fn):
                 if not calls: continue
                 
                 tc = 0; civs = []
-                for o in calls:
-                    v = o.get('volume', 0) or 0; p = o.get('last_price', 0) or 0; iv = o.get('implied_volatility', 0) or 0
+                price = quotes.get(stock, {}).get('last_price', 0) or 0
+                # Also get PUTs for IV fallback
+                try:
+                    rp = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=PUT', headers=H, timeout=6)
+                    puts = rp.json().get('data', []) if rp.status_code == 200 else []
+                except: puts = []
+                
+                price = quotes.get(stock, {}).get('last_price', 0) or 0
+                ivc, ivp = compute_iv_smart(calls, puts, price)
+                
+                near_atm = filter_near_atm_options(calls, price)
+                tc = 0
+                for o in near_atm:
+                    v = o.get('volume', 0) or 0; p = o.get('last_price', 0) or 0
                     if v > 0: tc += int(v * p * 100)
-                    if iv > 0: civs.append(float(iv))
                 
                 optionable[stock] = {
-                    'tc': tc, 'ivc': sum(civs)/len(civs)/100 if civs else 0,
-                    'price': quotes.get(stock, {}).get('last_price', 0) or 0,
+                    'tc': tc, 'ivc': ivc/100, 'ivp': ivp/100,
+                    'price': price,
                 }
             except: pass
             if (i+1) % 100 == 0:
