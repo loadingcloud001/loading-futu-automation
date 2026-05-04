@@ -475,13 +475,55 @@ def daily_full_sync(log_fn):
                 price = qd.get('last_price', 0) or 0
                 if price <= 0: continue
                 
-                ivc = props.get('Call IV', {}).get('number', 0) or 0
-                ivp = props.get('Put IV', {}).get('number', 0) or 0
                 tp = props.get('My Target Price', {}).get('number', 0) or 0
                 sp = props.get('My Stop Price', {}).get('number', 0) or 0
                 ds = int(props.get('My Days', {}).get('number', 7) or 7)
                 
-                update = {'Stock Price': {'number': price}}
+                # Refresh option chain data with near-ATM filter
+                ivc = props.get('Call IV', {}).get('number', 0) or 0
+                ivp = props.get('Put IV', {}).get('number', 0) or 0
+                tc = props.get('CALL Turnover', {}).get('number', 0) or 0
+                tp_turnover = props.get('PUT Turnover', {}).get('number', 0) or 0
+                
+                try:
+                    H = {'X-API-Key': os.getenv('STOCK_API_KEY', 'test-api-key-12345')}
+                    r = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=CALL', headers=H, timeout=8)
+                    if r.status_code == 200:
+                        calls = r.json().get('data', [])
+                        try:
+                            rp = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=PUT', headers=H, timeout=6)
+                            puts = rp.json().get('data', []) if rp.status_code == 200 else []
+                        except: puts = []
+                        
+                        if calls:
+                            fresh_ivc, fresh_ivp = compute_iv_smart(calls, puts, price)
+                            ivc = fresh_ivc if fresh_ivc > 0 else ivc
+                            ivp = fresh_ivp if fresh_ivp > 0 else ivp
+                            
+                            near_atm = filter_near_atm_options(calls, price)
+                            tc = sum(int((o.get('volume',0) or 0) * (o.get('last_price',0) or 0) * 100) for o in near_atm)
+                            
+                            near_atm_p = filter_near_atm_options(puts, price) if puts else []
+                            tp_turnover = sum(int((o.get('volume',0) or 0) * (o.get('last_price',0) or 0) * 100) for o in near_atm_p)
+                except: pass
+                
+                total = tc + tp_turnover
+                pc = round(tp_turnover / tc, 2) if tc > 0 else (999 if tp_turnover > 0 else 0)
+                anomaly = '🔴 異常' if total > 100000000 else ('🟡 關注' if total > 50000000 else '🟢 正常')
+                direction = '📈 CALL主導' if tc > tp_turnover * 2 else ('📉 PUT主導' if tp_turnover > tc * 2 else '⚖️ 平衡')
+                
+                update = {
+                    'Stock Price': {'number': price},
+                    'Call IV': {'number': round(ivc, 4)},
+                    'Put IV': {'number': round(ivp, 4)},
+                    'IV Spread': {'number': round(ivc - ivp, 4)},
+                    'CALL Turnover': {'number': tc},
+                    'PUT Turnover': {'number': tp_turnover},
+                    'Total Turnover': {'number': total},
+                    'P/C Ratio': {'number': pc},
+                    'Anomaly': {'select': {'name': anomaly}},
+                    'Direction Signal': {'select': {'name': direction}},
+                }
                 
                 # B-S with user inputs (or defaults)
                 if ivc > 0:
