@@ -58,7 +58,17 @@ def get_option_chain(stock: str, expiry: str = None,
     
     Returns list of option dicts with: code, strike_price, last_price,
     implied_volatility, delta, gamma, theta, vega, open_interest, volume
+    
+    Note: For PUT options, delta is negative. The API handles this correctly
+    when option_type='PUT' is set.
     """
+    # Auto-adjust delta range for PUTs (negative delta values)
+    if option_type and option_type.upper() == 'PUT':
+        if delta_min > 0 and delta_min == 0.05:  # default CALL values
+            delta_min = -0.92
+        if delta_max > 0 and delta_max == 0.92:  # default CALL values
+            delta_max = -0.05
+    
     params = {
         "delta_min": delta_min,
         "delta_max": delta_max,
