@@ -1,29 +1,61 @@
 """Futu Stock API Client - wraps stockapi.loadingtechnology.app REST API.
 Replaces direct Futu SDK calls with simple HTTP requests.
+Includes built-in rate limiting (100 req/min) with exponential backoff.
 """
 import requests
 import time
 import os
 from typing import Optional, List, Dict
+from threading import Lock
 
 API_BASE = "https://stockapi.loadingtechnology.app/api/v1"
 API_KEY = os.getenv("STOCK_API_KEY", "test-api-key-12345")
 HEADERS = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
 
+# Rate limiter: 100 requests per minute (1 request per 0.6s)
+_RATE_LIMIT_INTERVAL = 0.65  # seconds between requests
+_last_request_time = 0.0
+_rate_lock = Lock()
 
-def _get(path: str, params: dict = None, timeout: int = 30) -> dict:
-    """GET request to stock API."""
+
+def _rate_limit():
+    """Enforce rate limit - blocks if requests are too frequent."""
+    global _last_request_time
+    with _rate_lock:
+        elapsed = time.time() - _last_request_time
+        if elapsed < _RATE_LIMIT_INTERVAL:
+            time.sleep(_RATE_LIMIT_INTERVAL - elapsed)
+        _last_request_time = time.time()
+
+
+def _request_with_retry(method: str, url: str, max_retries: int = 3, **kwargs) -> requests.Response:
+    """Make HTTP request with rate limiting + retry on 429/400 rate limit errors."""
+    for attempt in range(max_retries):
+        _rate_limit()
+        resp = requests.request(method, url, headers=HEADERS, **kwargs)
+        
+        if resp.status_code in (429, 400):
+            # Rate limited - exponential backoff
+            if attempt < max_retries - 1:
+                backoff = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                time.sleep(backoff)
+                continue
+        
+        resp.raise_for_status()
+        return resp
+
+
+def _get(path: str, params: dict = None, timeout: int = 15) -> dict:
+    """GET request to stock API (rate limited + retry)."""
     url = f"{API_BASE}{path}"
-    resp = requests.get(url, headers=HEADERS, params=params, timeout=timeout)
-    resp.raise_for_status()
+    resp = _request_with_retry("GET", url, params=params, timeout=timeout)
     return resp.json()
 
 
-def _post(path: str, body: dict = None, timeout: int = 30) -> dict:
-    """POST request to stock API."""
+def _post(path: str, body: dict = None, timeout: int = 15) -> dict:
+    """POST request to stock API (rate limited + retry)."""
     url = f"{API_BASE}{path}"
-    resp = requests.post(url, headers=HEADERS, json=body, timeout=timeout)
-    resp.raise_for_status()
+    resp = _request_with_retry("POST", url, json=body, timeout=timeout)
     return resp.json()
 
 

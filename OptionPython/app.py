@@ -352,33 +352,17 @@ def sunday_scan(log_fn):
         for i, stock in enumerate(top500):
             has_options = False
             active_calls = active_puts = 0
-            for attempt in range(2):
-                try:
-                    r = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=CALL', headers=H, timeout=10)
-                    if r.status_code != 200: continue
-                    calls = r.json().get('data', [])
-                    if not calls: continue
-                    
-                    rp = requests.get(f'https://stockapi.loadingtechnology.app/api/v1/option/chain/{stock}?option_type=PUT', headers=H, timeout=8)
-                    puts = rp.json().get('data', []) if rp.status_code == 200 else []
-                    
-                    price = quotes.get(stock, {}).get('last_price', 0) or 0
-                    near_calls = filter_near_atm_options(calls, price) if calls else []
-                    near_puts = filter_near_atm_options(puts, price) if puts else []
-                    
-                    active_calls = sum(1 for o in near_calls if (o.get('volume', 0) or 0) > 0)
-                    active_puts = sum(1 for o in near_puts if (o.get('volume', 0) or 0) > 0)
-                    
-                    if active_calls + active_puts >= 2:
-                        has_options = True
-                        break
-                    time.sleep(1)
-                except: time.sleep(1)
-            if has_options:
+            price = quotes.get(stock, {}).get('last_price', 0) or 0
+            calls = get_option_chain(stock, option_type='CALL')
+            puts = get_option_chain(stock, option_type='PUT')
+            near_calls = filter_near_atm_options(calls, price) if calls else []
+            near_puts = filter_near_atm_options(puts, price) if puts else []
+            active_calls = sum(1 for o in near_calls if (o.get('volume', 0) or 0) > 0)
+            active_puts = sum(1 for o in near_puts if (o.get('volume', 0) or 0) > 0)
+            if active_calls + active_puts >= 2:
                 option_stocks.append(stock)
             if (i+1) % 50 == 0:
                 log_fn(f"  {i+1}/500: {len(option_stocks)} have options (last: {stock} C{active_calls}+P{active_puts})")
-            time.sleep(0.15)
 
         log_fn(f"Stocks with options: {len(option_stocks)}")
 
