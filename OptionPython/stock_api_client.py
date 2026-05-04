@@ -161,21 +161,27 @@ def get_all_us_stocks(cache_path: str = "/tmp/us_stocks_cache.json", force_refre
         return []
     
     all_stocks = set()
+    failed_plates = []
     for i, plate in enumerate(plates):
         pc = plate.get("plate_code", "")
         if not pc:
             continue
-        try:
-            stock_data = _get(f"/market/plate/stock/{pc}", timeout=10)
-            stocks = stock_data.get("stocks", [])
-            all_stocks.update(stocks)
-        except Exception:
-            continue
-        # Small delay between calls
-        if i % 20 == 0:
-            time.sleep(0.5)
-        else:
-            time.sleep(0.15)
+        # Retry logic: 2 attempts with backoff
+        success = False
+        for attempt in range(2):
+            try:
+                stock_data = _get(f"/market/plate/stock/{pc}", timeout=10)
+                stocks = stock_data.get("stocks", [])
+                all_stocks.update(stocks)
+                success = True
+                break
+            except Exception:
+                if attempt < 1:
+                    time.sleep(2)  # Backoff before retry
+        if not success:
+            failed_plates.append(pc)
+        # Rate limit: ~1 request per second to avoid 429/400
+        time.sleep(1.0)
     
     stock_list = sorted(all_stocks)
     
