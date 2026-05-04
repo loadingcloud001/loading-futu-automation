@@ -25,13 +25,46 @@ SYNC_INTERVAL_MINUTES = int(os.getenv("SYNC_INTERVAL_MINUTES", "0"))  # 0 = dail
 
 # === 工具函式 ===
 # === Option chain filter ===
-def filter_near_atm_options(options: list, stock_price: float, pct_range: float = 0.30) -> list:
-    """Filter options to near-ATM strikes (±30% of stock price)."""
+def parse_option_expiry(option: dict) -> str:
+    """Extract expiry date from option code (e.g., US.MU260508C35000 → 2026-05-08)."""
+    code = option.get('code', '') or ''
+    # Find YYMMDD pattern before C/P
+    import re
+    m = re.search(r'(\d{6})[CP]', code)
+    if m:
+        yymmdd = m.group(1)
+        try:
+            yy = int(yymmdd[:2]) + 2000
+            mm = int(yymmdd[2:4])
+            dd = int(yymmdd[4:6])
+            return f'{yy:04d}-{mm:02d}-{dd:02d}'
+        except: pass
+    return ''
+
+def filter_near_atm_options(options: list, stock_price: float, pct_range: float = 0.30, max_expiry_days: int = 35) -> list:
+    """Filter options to near-ATM strikes (±30% of stock price) and within max_expiry_days."""
     if stock_price <= 0:
         return options
     lo = stock_price * (1 - pct_range)
     hi = stock_price * (1 + pct_range)
-    return [o for o in options if lo <= (o.get('strike_price', 0) or 0) <= hi]
+    
+    from datetime import date, timedelta
+    today = date.today()
+    cutoff = today + timedelta(days=max_expiry_days)
+    cutoff_str = cutoff.strftime('%Y-%m-%d')
+    
+    result = []
+    for o in options:
+        strike = o.get('strike_price', 0) or 0
+        if not (lo <= strike <= hi):
+            continue
+        # Filter by expiry: within max_expiry_days
+        expiry = parse_option_expiry(o)
+        if expiry and expiry > cutoff_str:
+            continue  # Too far in the future
+        result.append(o)
+    
+    return result if result else [o for o in options if lo <= (o.get('strike_price', 0) or 0) <= hi]  # Fallback: ignore expiry
 
 def compute_iv_smart(calls: list, puts: list, stock_price: float) -> tuple:
     """Get best IV as decimal (0-2.0). Uses near-ATM, falls back to other side."""
@@ -511,6 +544,8 @@ def daily_full_sync(log_fn):
             t_delta = round((total - yest_total) / yest_total, 4) if yest_total > 0 else 0
             ivc_change = round((ivc - yest_ivc) / yest_ivc, 4) if yest_ivc > 0 else 0
             iv_spread = round(ivc - ivp, 4)
+            # IV Rank: rough estimate (percentile within current population)
+            iv_rank = max(0, min(1.0, ivc / 2.0))  # 0-200% IV → 0-1 rank
 
             # Anomaly detection
             is_anomaly = abs(t_delta) > 0.2 or abs(ivc_change) > 0.2
@@ -538,6 +573,13 @@ def daily_full_sync(log_fn):
             if iv_spread > 0.05: signals.append('Call IV溢價')
             elif iv_spread < -0.05: signals.append('Put IV溢價')
 
+            # Trend summary
+            trend_parts = []
+            if iv_rank > 0.8: trend_parts.append(f'IV高位({iv_rank*100:.0f}%)')
+            elif iv_rank < 0.2: trend_parts.append(f'IV低位({iv_rank*100:.0f}%)')
+            if ivc_change > 0.1: trend_parts.append(f'IV上升')
+            elif ivc_change < -0.1: trend_parts.append(f'IV下降')
+
             # Build update payload
             update = {
                 'Stock Price': {'number': price},
@@ -554,6 +596,11 @@ def daily_full_sync(log_fn):
                 'Yest Put IV': {'number': yest_ivp},
                 'Turnover Δ%': {'number': t_delta},
                 'IVc Change': {'number': ivc_change},
+                'IV Rank': {'number': iv_rank},
+                'IV Trend Score': {'number': ivc_change * 100},
+                'Volume Momentum': {'number': t_delta},
+                'Anomaly Streak': {'number': 0},
+                'Trend Summary': {'rich_text': [{'text': {'content': ' | '.join(trend_parts)}}]},
                 'Anomaly': {'select': {'name': anomaly}},
                 'Direction Signal': {'select': {'name': direction}},
                 'Signal': {'rich_text': [{'text': {'content': ' | '.join(signals)}}]},
